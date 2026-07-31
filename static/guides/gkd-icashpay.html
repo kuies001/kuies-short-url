@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#071b18">
+  <meta name="description" content="Android 使用 GKD 本地應用規則，自動關閉 icash Pay 首頁活動廣告的完整安全設定教學。">
+  <link rel="canonical" href="https://u.kuies.tw/gkd">
+  <meta property="og:locale" content="zh_TW">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="KUIES 教學">
+  <meta property="og:title" content="用 GKD 自動關閉 icash Pay 活動廣告">
+  <meta property="og:description" content="Android 限定｜本地應用規則、完整 JSON5、安全邊界、測試與停用方式。">
+  <meta property="og:url" content="https://u.kuies.tw/gkd">
+  <meta property="og:image" content="https://u.kuies.tw/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="用 GKD 自動關閉 icash Pay 活動廣告">
+  <meta name="twitter:description" content="Android 限定｜本地應用規則與完整安全設定教學。">
+  <meta name="twitter:image" content="https://u.kuies.tw/og-image.png">
+  <title>用 GKD 自動關閉 icash Pay 活動廣告｜Android 教學</title>
+  <style>
+    :root{
+      --bg:#061412;--panel:#0b201c;--panel-2:#102a24;--line:#275046;
+      --text:#eefbf7;--muted:#a9c8bf;--mint:#69e6b4;--cyan:#79dbea;
+      --amber:#ffd47a;--red:#ff9a9a;--shadow:0 22px 70px rgba(0,0,0,.28)
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{margin:0;background:radial-gradient(circle at 86% 4%,#164437 0,transparent 30rem),linear-gradient(180deg,#061412,#081814 45%,#05100e);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;line-height:1.75}
+    a{color:var(--cyan);text-underline-offset:3px}
+    .wrap{width:min(100% - 32px,980px);margin:auto}
+    .hero{padding:72px 0 34px}
+    .eyebrow{display:inline-flex;gap:8px;align-items:center;border:1px solid #397465;background:#0b2c25;padding:7px 12px;border-radius:999px;color:#cffff0;font-weight:800;font-size:.9rem;letter-spacing:.04em}
+    h1{font-size:clamp(2.25rem,7vw,4.65rem);line-height:1.04;letter-spacing:-.045em;margin:22px 0 18px;max-width:850px}
+    .lead{font-size:clamp(1.08rem,2.3vw,1.3rem);color:#c5ded7;max-width:760px;margin:0 0 26px}
+    .cta-row{display:flex;gap:12px;flex-wrap:wrap}
+    .button{display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;border-radius:13px;padding:12px 17px;font-weight:850;border:1px solid transparent;transition:.18s ease}
+    .button.primary{background:var(--mint);color:#05231a}.button.secondary{border-color:#3a665c;background:#0a211c;color:var(--text)}
+    .button:hover{transform:translateY(-1px);filter:brightness(1.05)}
+    .notice{margin:26px 0 0;padding:16px 18px;border-left:4px solid var(--amber);background:#2a2414;border-radius:0 14px 14px 0;color:#ffedbd}
+    main{padding-bottom:68px}
+    .toc{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:26px 0 42px}
+    .toc a{background:rgba(12,37,31,.86);border:1px solid var(--line);border-radius:14px;padding:13px;text-decoration:none;color:#dff9f0;font-weight:750}
+    section{scroll-margin-top:22px;margin:22px 0;padding:clamp(20px,4vw,34px);background:linear-gradient(145deg,rgba(14,43,36,.96),rgba(8,28,24,.96));border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}
+    h2{font-size:clamp(1.45rem,3.5vw,2rem);margin:0 0 18px;letter-spacing:-.02em}
+    h3{font-size:1.08rem;margin:24px 0 8px;color:#d7fff1}
+    p{margin:10px 0}.muted{color:var(--muted)}
+    .steps{counter-reset:step;list-style:none;padding:0;margin:0;display:grid;gap:14px}
+    .steps li{counter-increment:step;position:relative;padding:16px 16px 16px 58px;background:var(--panel-2);border:1px solid #2b554b;border-radius:15px}
+    .steps li::before{content:counter(step);position:absolute;left:16px;top:16px;width:29px;height:29px;display:grid;place-items:center;background:var(--mint);color:#062419;border-radius:9px;font-weight:900}
+    code{font-family:"SFMono-Regular",Consolas,monospace}
+    :not(pre)>code{background:#061b16;color:#aaf5d5;border:1px solid #254b41;padding:.12em .42em;border-radius:7px;overflow-wrap:anywhere}
+    .code-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px;background:#081610;border:1px solid #2c5547;border-bottom:0;border-radius:16px 16px 0 0;padding:10px 12px;color:#bcd8ce}
+    .copy{border:0;background:var(--mint);color:#062319;font-weight:850;padding:8px 12px;border-radius:9px;cursor:pointer}
+    pre{margin:0;background:#04100d;border:1px solid #2c5547;border-radius:0 0 16px 16px;padding:18px;overflow:auto;color:#d9fff1;font-size:.88rem;line-height:1.65;tab-size:2}
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+    .mini{background:#0d2923;border:1px solid #2b574c;border-radius:16px;padding:17px}
+    .mini h3{margin:0 0 7px}.safe{color:#8bf0c7}.danger{color:var(--red)}
+    .compat{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .status{padding:16px;border-radius:15px;border:1px solid}.status.ok{background:#0b3026;border-color:#27795e}.status.no{background:#351c1c;border-color:#7a3c3c}
+    footer{color:#86a69d;text-align:center;padding:0 16px 38px;font-size:.92rem}
+    @media(max-width:760px){.hero{padding-top:46px}.toc{grid-template-columns:1fr 1fr}.grid,.compat{grid-template-columns:1fr}.wrap{width:min(100% - 22px,980px)}section{border-radius:19px}.code-head{align-items:flex-start;flex-direction:column}.copy{width:100%}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.button{transition:none}}
+  </style>
+</head>
+<body>
+  <header class="hero wrap">
+    <div class="eyebrow">🤖 Android 限定</div>
+    <h1>用 GKD 自動關閉<br>icash Pay 活動廣告</h1>
+    <p class="lead">使用本地「應用規則」精準點擊首頁廣告右側的關閉按鈕，不用座標、不套用到其他 App，也不會點擊付款或授權功能。</p>
+    <div class="cta-row">
+      <a class="button primary" href="https://github.com/gkd-kit/gkd/releases" target="_blank" rel="noopener noreferrer">前往 GKD 官方 GitHub Releases</a>
+      <a class="button secondary" href="#rule">直接查看規則</a>
+    </div>
+    <div class="notice"><strong>先看相容性：</strong>目前已在 Samsung Galaxy Z Flip7 展開後的主螢幕驗證成功；Flip7 封面小螢幕目前無法自動觸發，請勿把本規則視為封面螢幕支援方案。</div>
+  </header>
+
+  <main class="wrap">
+    <nav class="toc" aria-label="本頁目錄">
+      <a href="#install">① 安裝與權限</a>
+      <a href="#setup">② 本地訂閱</a>
+      <a href="#rule">③ 完整規則</a>
+      <a href="#safety">④ 安全與測試</a>
+    </nav>
+
+    <section id="install">
+      <h2>① 安裝 GKD 與必要權限</h2>
+      <ol class="steps">
+        <li><strong>只從官方來源下載：</strong>前往 <a href="https://github.com/gkd-kit/gkd" target="_blank" rel="noopener noreferrer">GKD 官方 GitHub 專案</a>，再從 <a href="https://github.com/gkd-kit/gkd/releases" target="_blank" rel="noopener noreferrer">Releases</a> 下載最新版 APK。不要安裝來路不明、遭重新打包的 APK。</li>
+        <li><strong>允許安裝 APK：</strong>如果 Android 阻擋安裝，請暫時允許目前使用的瀏覽器或檔案管理器「安裝未知應用程式」。安裝完成後可將這項權限關閉。</li>
+        <li><strong>啟用無障礙服務：</strong>開啟 GKD，在首頁按下無障礙權限旁的「授權」，到 Android 設定中允許 GKD 無障礙服務。沒有這項權限，GKD 無法讀取或點擊畫面節點。</li>
+        <li><strong>Shizuku 非必要：</strong>這條規則在主螢幕依靠 GKD 無障礙服務即可運作，不需要為它另外安裝或授權 Shizuku。</li>
+      </ol>
+      <p class="muted">GKD 是 Android 工具，iPhone／iOS 不適用。不同品牌與系統版本的設定名稱可能稍有差異。</p>
+    </section>
+
+    <section id="setup">
+      <h2>② 建立本地「應用規則」</h2>
+      <ol class="steps">
+        <li>開啟 GKD，依序進入：<strong>首頁 → 訂閱 → 本地訂閱 → 應用規則</strong>。</li>
+        <li>按右上角的新增按鈕；不同版本可能顯示為「＋」或「新增應用規則」。</li>
+        <li>複製下一節的完整 JSON5，貼入編輯器。請從最外層的 <code>{</code> 一直到最後一個 <code>}</code> 全部貼上。</li>
+        <li>儲存後確認清單出現 <strong>icash Pay</strong>，並確認「啟動廣告－自動關閉」規則組保持啟用。</li>
+        <li>不要貼到「全域規則」。這份內容是完整的應用規則，最外層已使用 icash Pay 套件名稱限制作用範圍。</li>
+      </ol>
+    </section>
+
+    <section id="rule">
+      <h2>③ icash Pay 應用規則</h2>
+      <p>這是<strong>應用規則，不是全域規則</strong>。最外層 <code>id</code> 固定為 <code>tw.com.icash.a.icashpay</code>，只會在 icash Pay 中啟用。</p>
+      <div class="code-head"><span>JSON5｜完整複製後貼入「應用規則」</span><button class="copy" type="button" onclick="copyRule(this)">複製規則</button></div>
+      <pre><code id="ruleCode">{
+  id: 'tw.com.icash.a.icashpay',
+  name: 'icash Pay',
+  groups: [
+    {
+      key: 0,
+      name: '啟動廣告－自動關閉',
+      desc: '僅作用於 icash Pay 主螢幕啟動流程，精準匹配活動廣告右側的關閉容器。',
+      activityIds: [
+        'tw.net.pic.m.wallet.activity.WelcomeActivityV3',
+        'tw.com.icash.icashpay.framework.page.splash.SplashActivity',
+      ],
+      matchRoot: true,
+      fastQuery: true,
+      forcedTime: 12000,
+      rules: {
+        key: 0,
+        matches: '[vid=&quot;bottom_view&quot;] &gt; [vid=&quot;close&quot;] &gt; @[vid=&quot;container&quot;][clickable=true] &gt; [vid=&quot;label&quot;][text=&quot;關閉&quot;][visibleToUser=true]',
+        action: 'clickNode',
+        actionMaximum: 1,
+        resetMatch: 'app',
+      },
+    },
+  ],
+}</code></pre>
+      <h3>選擇器在做什麼？</h3>
+      <p><code>bottom_view → close → container → label「關閉」</code> 必須同時成立。符號 <code>@</code> 代表實際點擊可點擊的 <code>container</code>，不是只含文字但不一定能點的標籤節點。</p>
+    </section>
+
+    <section id="safety">
+      <h2>④ 安全邊界</h2>
+      <div class="grid">
+        <article class="mini"><h3 class="safe">✓ 只限定 icash Pay</h3><p>套件名稱及啟動 Activity 都已限制，規則不會跑到其他銀行、錢包或購物 App。</p></article>
+        <article class="mini"><h3 class="safe">✓ 四層節點結構</h3><p>不只匹配「關閉」兩個字，還要求廣告底欄、close 區塊、可點擊容器及可見標籤全部吻合。</p></article>
+        <article class="mini"><h3 class="safe">✓ 不使用座標</h3><p>依無障礙節點點擊，不會因螢幕尺寸、縮放或折疊比例改變就把固定座標送到錯誤位置。</p></article>
+        <article class="mini"><h3 class="safe">✓ 不改變顯示偏好</h3><p>本規則只點右側「關閉」，不點左側「今日不再顯示」，也不會碰付款、登入、儲值、轉帳、乘車碼或確認按鈕。</p></article>
+      </div>
+      <p class="notice"><strong>無障礙權限很強大：</strong>請只加入自己理解、來源可信的規則。不要為了方便改成全域 <code>[text=&quot;關閉&quot;]</code>，也不要加入模糊的確認文字或固定座標。</p>
+    </section>
+
+    <section id="test">
+      <h2>⑤ 測試方式</h2>
+      <ol class="steps">
+        <li>確認 GKD 無障礙服務、icash Pay 應用規則及規則組都已啟用。</li>
+        <li>在最近使用的 App 畫面中滑掉 icash Pay，讓它完全關閉。</li>
+        <li>將 Flip7 完全展開，從主螢幕圖示冷啟動 icash Pay。</li>
+        <li>活動廣告出現後等待幾秒；規則應自動點擊右側「關閉」。</li>
+        <li>第一次未成功時，先重新確認權限與規則開關。不要立刻把選擇器改寬；應擷取 GKD 快照或匯出日誌，再依實際節點診斷。</li>
+      </ol>
+      <div class="compat">
+        <div class="status ok"><strong>✓ 已驗證</strong><br>Samsung Galaxy Z Flip7 展開後的主螢幕冷啟動。</div>
+        <div class="status no"><strong>✕ 目前未支援</strong><br>Flip7 封面小螢幕：快照可讀到節點，但 GKD 規則引擎收不到可用的次要顯示器事件。</div>
+      </div>
+    </section>
+
+    <section id="maintain">
+      <h2>⑥ 失效、停用或移除</h2>
+      <h3>icash Pay 更新後失效</h3>
+      <p>App 改版可能更換 Activity 或資源 ID。規則若突然不動，先停用它，再用 GKD 擷取新快照，不要改成更模糊的全域文字規則。</p>
+      <h3>暫時停用</h3>
+      <p>進入「首頁 → 訂閱 → 本地訂閱 → 應用規則 → icash Pay」，關閉「啟動廣告－自動關閉」規則組。</p>
+      <h3>停用或移除</h3>
+      <p>在 icash Pay 應用規則頁使用右上角選單刪除本地規則；如果完全不再使用 GKD，也可先關閉 GKD 無障礙服務，再解除安裝。</p>
+    </section>
+  </main>
+
+  <footer>本頁為個人實測教學，與 GKD、icash Pay 或其營運公司無合作關係。App 更新可能使規則失效，請以實機測試為準。</footer>
+  <script>
+    async function copyRule(button){
+      const text=document.getElementById('ruleCode').textContent;
+      try{await navigator.clipboard.writeText(text);button.textContent='已複製 ✓'}
+      catch(_){button.textContent='請長按程式碼複製'}
+      setTimeout(()=>button.textContent='複製規則',2200);
+    }
+  </script>
+</body>
+</html>

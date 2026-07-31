@@ -1,0 +1,77 @@
+{
+  "非 ASCII 字元": {
+    "regex": "[^\\p{ASCII}]"
+  },
+  "網域含大寫字母": {
+    "regex": "^.*?://[^/?#]*[A-Z]"
+  },
+  "Rickroll": {
+    "regex": "youtu\\.?be.*dQw4w9WgXcQ"
+  },
+  "HTTP 網址": {
+    "regex": "^http://",
+    "replacement": "https://"
+  },
+  "缺少網址協定：補上 HTTP": {
+    "regex": "^(?!.*:)",
+    "replacement": "http://$0"
+  },
+  "缺少網址協定：補上 HTTPS": {
+    "regex": "^(?!.*:)",
+    "replacement": "https://$0"
+  },
+  "修正錯誤的 HTTP 協定": {
+    "regex": "^(?!http:)[hH][tT]{2}[pP]:(.*)",
+    "replacement": "http:$1",
+    "automatic": true
+  },
+  "修正錯誤的 HTTPS 協定": {
+    "regex": "^(?!https:)[hH][tT]{2}[pP][sS]:(.*)",
+    "replacement": "https:$1",
+    "automatic": true
+  },
+  "Reddit ➔ Eddrit": {
+    "regex": "^https?://(?:[a-z0-9-]+\\.)*?reddit\\.com/(.*)",
+    "replacement": "https://eddrit.com/$1",
+    "enabled": false
+  },
+  "Twitter/X ➔ Nitter": {
+    "regex": "^https?://(?:[a-z0-9-]+\\.)*?(?:twitter|x)\\.com/(.*)",
+    "replacement": "https://nitter.net/$1",
+    "enabled": false
+  },
+  "Youtube ➔ Invidious": {
+    "regex": "^https?://(?:[a-z0-9-]+\\.)*?youtube\\.com/(.*)",
+    "replacement": [
+      "https://yewtu.be/$1",
+      "https://farside.link/invidious/$1"
+    ],
+    "enabled": false
+  },
+  "Farside.link": {
+    "replacement": [
+      "https://farside.link/$0"
+    ],
+    "enabled": false
+  },
+  "URL ➔ Songlink": {
+    "regex": "^https?://(?:www\\.)?(open\\.spotify\\.com|music\\.apple\\.com|(?:music\\.)?youtube\\.com/watch|youtu\\.be|soundcloud\\.com|tidal\\.com|deezer\\.com|[^/]*\\.bandcamp\\.com|music\\.amazon\\.com)",
+    "excludeRegex": "^https://song\\.link/",
+    "replacement": "https://song.link/$0",
+    "enabled": false
+  },
+  "Kuies：還原 Facebook 分享網址": {
+    "regex": "(?i)^https%3A%2F%2F(?:www\\.|m\\.)?facebook\\.com%2Fshare(?:%2F[prv])?%2F[A-Za-z0-9_-]+%2F?(?:%3F.*)?$",
+    "replacement": "https://u.kuies.tw/sr?url=$0",
+    "encode": true,
+    "automatic": true,
+    "enabled": true
+  },
+  "Kuies：還原 Threads 分享網址": {
+    "regex": "(?i)^https%3A%2F%2F(?:www\\.)?threads\\.(?:com|net)%2Fshare%2F[A-Za-z0-9_-]+%2F?(?:%3F.*)?$",
+    "replacement": "https://u.kuies.tw/sr?url=$0",
+    "encode": true,
+    "automatic": true,
+    "enabled": true
+  }
+}

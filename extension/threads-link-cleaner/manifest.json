@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "kuies.tw Short URL",
+  "version": "1.7.1",
+  "description": "透過 u.kuies.tw 縮短網址，可在 Threads、Facebook 與 IG 複製連結時自動移除追蹤參數並縮短。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["activeTab", "clipboardRead", "clipboardWrite", "storage"],
+  "host_permissions": [
+    "https://u.kuies.tw/*",
+    "https://www.threads.com/*",
+    "https://threads.com/*",
+    "https://www.threads.net/*",
+    "https://threads.net/*",
+    "https://www.instagram.com/*",
+    "https://instagram.com/*",
+    "https://www.facebook.com/*",
+    "https://facebook.com/*",
+    "https://m.facebook.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-interceptor.js"],
+      "matches": [
+        "https://www.threads.com/*",
+        "https://threads.com/*",
+        "https://www.threads.net/*",
+        "https://threads.net/*",
+        "https://www.instagram.com/*",
+        "https://instagram.com/*",
+        "https://www.facebook.com/*",
+        "https://facebook.com/*",
+        "https://m.facebook.com/*"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.threads.com/*",
+        "https://threads.com/*",
+        "https://www.threads.net/*",
+        "https://threads.net/*",
+        "https://www.instagram.com/*",
+        "https://instagram.com/*",
+        "https://www.facebook.com/*",
+        "https://facebook.com/*",
+        "https://m.facebook.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "kuies.tw 短網址",
+    "default_popup": "popup.html"
+  }
+}

@@ -1,0 +1,30 @@
+# 私密設定與憑證
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 執行期資料、資料庫與日誌
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Python 快取
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 建置與封裝產物；以原始碼重建
+/dist/
+static/downloads/*.zip
+*.zip
+
+# 系統與編輯器檔案
+.DS_Store
+.vscode/
+.idea/

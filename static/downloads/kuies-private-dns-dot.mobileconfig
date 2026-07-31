@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>DNSSettings</key>
+            <dict>
+                <key>DNSProtocol</key>
+                <string>TLS</string>
+                <key>ServerName</key>
+                <string>dns.kuies.tw</string>
+            </dict>
+            <key>OnDemandRules</key>
+            <array>
+                <dict>
+                    <key>Action</key>
+                    <string>Connect</string>
+                </dict>
+            </array>
+            <key>PayloadDescription</key>
+            <string>使用 dns.kuies.tw 作為全域 DNS-over-TLS 私人 DNS。</string>
+            <key>PayloadDisplayName</key>
+            <string>kuies.tw 私人 DNS</string>
+            <key>PayloadIdentifier</key>
+            <string>tw.kuies.dns.settings</string>
+            <key>PayloadType</key>
+            <string>com.apple.dnsSettings.managed</string>
+            <key>PayloadUUID</key>
+            <string>762A5FDF-A9CC-4D73-A70D-94DB49E1DEB0</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+    </array>
+    <key>PayloadDescription</key>
+    <string>設定 iPhone/iPad 使用 dns.kuies.tw 的 DNS-over-TLS 私人 DNS。</string>
+    <key>PayloadDisplayName</key>
+    <string>kuies.tw 私人 DNS</string>
+    <key>PayloadIdentifier</key>
+    <string>tw.kuies.dns.profile</string>
+    <key>PayloadOrganization</key>
+    <string>kuies.tw</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>4DD77B12-CE95-42FF-AF14-3997EECE7121</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>

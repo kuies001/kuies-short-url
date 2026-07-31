@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 350px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 12px; color: #111827; }
+    h3 { margin: 0 0 8px; }
+    p { line-height: 1.5; }
+    button { display: block; width: 100%; margin: 8px 0; padding: 10px 12px; border: 0; border-radius: 10px; background: #111827; color: white; cursor: pointer; font-weight: 700; }
+    button.secondary { background: #0369a1; }
+    button.ghost { background: #6b7280; }
+    #status { margin-top: 10px; color: #374151; line-height: 1.5; word-break: break-all; }
+    .hint, .target { color: #6b7280; font-size: 12px; }
+    .switch-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 10px; margin: 10px 0; border: 1px solid #e5e7eb; border-radius: 12px; background: #f9fafb; }
+    .switch-row input { width: 18px; height: 18px; }
+    .switch-label { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; cursor: pointer; }
+    .switch-title { font-weight: 700; }
+    .sync-inline { width: auto; margin: 0; padding: 7px 9px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+    .footer-links { margin-top: 12px; padding-top: 10px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; line-height: 1.6; }
+    .footer-links a { color: #0369a1; font-weight: 700; text-decoration: none; }
+    .footer-links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h3>kuies.tw 短網址</h3>
+  <p>可手動縮短目前分頁或剪貼簿網址；也可開啟自動模式，在 Threads、Facebook 與 IG 點「複製連結」時自動移除追蹤參數並縮成 u.kuies.tw。</p>
+
+  <div class="switch-row">
+    <label class="switch-label" for="autoCleanToggle">
+      <input id="autoCleanToggle" type="checkbox">
+      <span>
+        <span class="switch-title">自動去除並縮短</span><br>
+        <span class="hint">說明：關閉後只保留下方手動功能</span>
+      </span>
+    </label>
+    <button id="syncState" class="ghost sync-inline" type="button">🔄 更新狀態</button>
+  </div>
+
+  <button id="shortenClean" class="secondary">縮短網址+去除追蹤碼</button>
+  <button id="shorten">只縮短網址</button>
+  <p class="hint">追蹤清理目前支援 Threads、Facebook 與 IG</p>
+  <div id="status"></div>
+  <p class="footer-links">
+    <a href="https://u.kuies.tw/surl" target="_blank" rel="noopener">縮短網址服務網頁</a><br>
+    <a href="https://www.threads.com/@kuies001" target="_blank" rel="noopener">我的 Threads 個人網頁</a>
+  </p>
+  <script src="popup.js"></script>
+</body>
+</html>
