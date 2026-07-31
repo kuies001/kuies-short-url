@@ -24,6 +24,9 @@ __pycache__/
 static/downloads/*.zip
 *.zip
 
+# Graphify 本機產生的知識圖譜
+graphify-out/
+
 # 系統與編輯器檔案
 .DS_Store
 .vscode/
