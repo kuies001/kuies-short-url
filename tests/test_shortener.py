@@ -453,7 +453,7 @@ class ShortURLTests(unittest.TestCase):
         self.assertIn('property="og:site_name" content="example.com"', html)
         self.assertIn('property="og:title" content="原站文章標題"', html)
         self.assertIn('property="og:description" content="原站文章摘要"', html)
-        self.assertIn('property="og:image" content="https://u.kuies.tw/preview-image/gen1.jpg"', html)
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen1-[0-9a-f]{12}\.jpg"')
         self.assertEqual(self.store.lookup("gen1")["clicks"], 0)
 
     def test_preview_crawler_general_target_falls_back_to_stored_title_and_default_image(self):
@@ -473,7 +473,7 @@ class ShortURLTests(unittest.TestCase):
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn('property="og:title" content="手動輸入標題"', html)
-        self.assertIn('property="og:image" content="https://u.kuies.tw/preview-image/gen2.png"', html)
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen2-[0-9a-f]{12}\.png"')
 
     def test_common_social_preview_bots_get_first_party_open_graph_page(self):
         self.store.create_url("https://www.threads.com/@abc/post/preview", code="bots", title="已移除追蹤參數的分享連結")
@@ -493,7 +493,7 @@ class ShortURLTests(unittest.TestCase):
             ]:
                 status, headers, body = app.handle("GET", "/bots", {}, b"", "8.8.8.8", user_agent)
                 self.assertEqual(status, 200, user_agent)
-                self.assertIn('property="og:image" content="https://u.kuies.tw/preview-image/bots.png"', body.decode())
+                self.assertRegex(body.decode(), r'property="og:image" content="https://u\.kuies\.tw/preview-image/bots-[0-9a-f]{12}\.png"')
         finally:
             shortener_app.fetch_open_graph_metadata = original_fetch
             shortener_app.cache_preview_image = original_cache
@@ -715,11 +715,11 @@ class ShortURLTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn('property="og:title" content="原始 Threads 貼文標題"', html)
         self.assertIn('property="og:description" content="原始 Threads 貼文內容摘要"', html)
-        self.assertIn('property="og:image" content="https://u.kuies.tw/preview-image/th1.jpg"', html)
-        self.assertIn('property="og:image:secure_url" content="https://u.kuies.tw/preview-image/th1.jpg"', html)
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
+        self.assertRegex(html, r'property="og:image:secure_url" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
         self.assertIn('name="twitter:card" content="summary_large_image"', html)
-        self.assertIn('name="twitter:image" content="https://u.kuies.tw/preview-image/th1.jpg"', html)
-        self.assertIn('<img src="https://u.kuies.tw/preview-image/th1.jpg"', html)
+        self.assertRegex(html, r'name="twitter:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
+        self.assertRegex(html, r'<img src="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
         self.assertIn('property="og:image:type" content="image/jpeg"', html)
         self.assertNotIn("已移除追蹤參數的分享連結", html)
         self.assertEqual(image_status, 200)
@@ -783,7 +783,7 @@ class ShortURLTests(unittest.TestCase):
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn('property="og:title" content="Threads 貼文｜@abc"', html)
-        self.assertIn('property="og:image" content="https://u.kuies.tw/preview-image/thlog.png"', html)
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/thlog-[0-9a-f]{12}\.png"')
         self.assertNotIn("Threads • 登入", html)
         self.assertNotIn("static.cdninstagram.com", html)
         self.assertEqual(cache_calls, [""])
@@ -1167,7 +1167,7 @@ class ShortURLTests(unittest.TestCase):
             page = fh.read()
         combined = "\n".join([content, popup, page, json.dumps(manifest)])
 
-        self.assertEqual(manifest["version"], "1.7.1")
+        self.assertEqual(manifest["version"], "1.7.2")
         self.assertIn("https://u.kuies.tw/*", manifest["host_permissions"])
         self.assertIn("https://www.facebook.com/*", manifest["host_permissions"])
         self.assertNotIn("192.168.", combined)

@@ -4,6 +4,9 @@
 // 主要用 window.postMessage 橋接，並保留 CustomEvent 相容舊版封包。
 
 const SHORTENER_API = 'https://u.kuies.tw/api/public/shorten';
+const PREVIEW_STATUS_API = 'https://u.kuies.tw/api/public/preview-status/';
+const PREVIEW_WAIT_MS = 2500;
+const PREVIEW_POLL_MS = 250;
 const DEFAULT_AUTO_CLEAN = true;
 const READY_EVENT = 'kuies-tracking-cleaner-ready';
 const READY_REQUEST_EVENT = 'kuies-tracking-cleaner-ready-request';
@@ -112,6 +115,52 @@ function cleanTrackingUrl(raw) {
   }
 }
 
+function previewCodeFromShortUrl(shortUrl) {
+  try {
+    const parsed = new URL(shortUrl);
+    if (parsed.origin !== 'https://u.kuies.tw') return '';
+    const code = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+    return /^[A-Za-z0-9_-]{1,64}$/.test(code) ? code : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForPreview(shortUrl, initialStatus = 'pending', options = {}) {
+  const code = previewCodeFromShortUrl(shortUrl);
+  if (!code) return shortUrl;
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : PREVIEW_WAIT_MS;
+  const pollMs = Number.isFinite(options.pollMs) ? options.pollMs : PREVIEW_POLL_MS;
+  const fetchImpl = options.fetchImpl || fetch;
+  if (['ready', 'profile_fallback', 'fallback'].includes(initialStatus) && options.initialAvailable) {
+    return shortUrl;
+  }
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetchImpl(`${PREVIEW_STATUS_API}${encodeURIComponent(code)}`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+      if (response.ok) {
+        const state = await response.json();
+        if (['ready', 'profile_fallback', 'fallback'].includes(state.preview_status) && state.preview_available) {
+          return shortUrl;
+        }
+      }
+    } catch (error) {
+      // 暫時網路錯誤不降級長網址；在總等待上限內繼續短輪詢。
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await sleep(Math.min(pollMs, remaining));
+  }
+  return shortUrl;
+}
+
 async function shortenUrl(url) {
   const response = await fetch(SHORTENER_API, {
     method: 'POST',
@@ -127,7 +176,9 @@ async function shortenUrl(url) {
   if (!response.ok || !data.short_url) {
     throw new Error(data.error || 'shorten_failed');
   }
-  return data.short_url;
+  return waitForPreview(data.short_url, data.preview_status, {
+    initialAvailable: Boolean(data.preview_available),
+  });
 }
 
 async function replaceClipboardWithShortUrl(cleanedUrl) {
@@ -217,4 +268,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-window.__threadsLinkCleaner = { cleanTrackingUrl, shortenUrl };
+window.__threadsLinkCleaner = { cleanTrackingUrl, shortenUrl, waitForPreview };

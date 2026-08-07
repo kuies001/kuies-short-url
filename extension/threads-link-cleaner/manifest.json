@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "kuies.tw Short URL",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "透過 u.kuies.tw 縮短網址，可在 Threads、Facebook 與 IG 複製連結時自動移除追蹤參數並縮短。",
   "icons": {
     "16": "icons/icon16.png",

@@ -75,6 +75,10 @@ LOCAL_PREVIEW_IMAGE_DIR = os.path.join(
 # Keep external storage opt-in. A mounted but unhealthy exFAT directory can block
 # directory enumeration for an hour, so the safe default is the local capped cache.
 PREVIEW_IMAGE_DIR = os.environ.get("SHORT_PREVIEW_IMAGE_DIR", LOCAL_PREVIEW_IMAGE_DIR)
+PREVIEW_READY_REFRESH_SECONDS = 7 * 24 * 60 * 60
+PREVIEW_RETRY_BASE_SECONDS = 60 * 60
+PREVIEW_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
+PREVIEW_VERSION_LENGTH = 12
 FALLBACK_PREVIEW_IMAGE_DIR = LOCAL_PREVIEW_IMAGE_DIR
 MAX_PREVIEW_IMAGE_BYTES = 5 * 1024 * 1024
 ABUSE_ALERT_WINDOW_SECONDS = 10 * 60
@@ -592,12 +596,17 @@ def _preview_image_cache_path(code: str) -> tuple[str, str] | tuple[None, None]:
     return None, None
 
 
-def cache_preview_image(code: str, image_url: str, timeout: int = 8) -> tuple[str, str] | tuple[None, None]:
+def cache_preview_image(
+    code: str,
+    image_url: str,
+    timeout: int = 8,
+    force: bool = False,
+) -> tuple[str, str] | tuple[None, None]:
     """Cache remote OG image under our own domain so Messenger can fetch it reliably."""
     if not (image_url or "").strip():
         return None, None
     cached_path, cached_type = _preview_image_cache_path(code)
-    if cached_path:
+    if cached_path and not force:
         return cached_path, cached_type
     if not SAFE_CODE_RE.match(code or ""):
         return None, None
@@ -643,6 +652,25 @@ def cache_preview_image(code: str, image_url: str, timeout: int = 8) -> tuple[st
             pass
         return None, None
     return path, normalized_type
+
+
+def preview_content_version(metadata: dict, image_path: str = "") -> str:
+    """Hash public preview content so social image caches get a new immutable URL."""
+    digest = hashlib.sha256()
+    normalized = {
+        "title": metadata.get("title") or "",
+        "description": metadata.get("description") or "",
+        "image": metadata.get("image") or "",
+    }
+    digest.update(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    if image_path and os.path.isfile(image_path):
+        try:
+            with open(image_path, "rb") as fh:
+                while chunk := fh.read(64 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            pass
+    return digest.hexdigest()[:PREVIEW_VERSION_LENGTH]
 
 
 def social_preview_fallback_title(target_url: str, host_label: str) -> str:
@@ -739,6 +767,10 @@ class ShortURLStore:
             "preview_description": "ALTER TABLE urls ADD COLUMN preview_description TEXT",
             "preview_status": "ALTER TABLE urls ADD COLUMN preview_status TEXT",
             "preview_updated_at": "ALTER TABLE urls ADD COLUMN preview_updated_at INTEGER",
+            "preview_failure_count": "ALTER TABLE urls ADD COLUMN preview_failure_count INTEGER NOT NULL DEFAULT 0",
+            "preview_next_retry_at": "ALTER TABLE urls ADD COLUMN preview_next_retry_at INTEGER",
+            "preview_last_error": "ALTER TABLE urls ADD COLUMN preview_last_error TEXT",
+            "preview_version": "ALTER TABLE urls ADD COLUMN preview_version TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing:
@@ -879,14 +911,36 @@ class ShortURLStore:
             )
             return cur.rowcount > 0
 
-    def update_preview_metadata(self, code: str, metadata: dict, status: str) -> bool:
+    def update_preview_metadata(
+        self,
+        code: str,
+        metadata: dict,
+        status: str,
+        image_path: str = "",
+        error: str = "",
+    ) -> bool:
         now = int(time.time())
         with self.connect() as conn:
+            previous = conn.execute(
+                "SELECT preview_failure_count FROM urls WHERE code = ?", (code,)
+            ).fetchone()
+            if previous is None:
+                return False
+            is_ready = status == "ready"
+            failure_count = 0 if is_ready else int(previous["preview_failure_count"] or 0) + 1
+            retry_delay = min(
+                PREVIEW_RETRY_BASE_SECONDS * (2 ** max(0, min(failure_count - 1, 20))),
+                PREVIEW_RETRY_MAX_SECONDS,
+            )
+            next_retry_at = None if is_ready else now + retry_delay
+            last_error = None if is_ready else ((error or status or "preview unavailable")[:500])
+            version = preview_content_version(metadata, image_path=image_path)
             cur = conn.execute(
                 """
                 UPDATE urls
                    SET preview_title = ?, preview_description = ?, preview_status = ?,
-                       preview_updated_at = ?, updated_at = ?
+                       preview_updated_at = ?, updated_at = ?, preview_failure_count = ?,
+                       preview_next_retry_at = ?, preview_last_error = ?, preview_version = ?
                  WHERE code = ?
                 """,
                 (
@@ -895,10 +949,66 @@ class ShortURLStore:
                     (status or "fallback")[:64],
                     now,
                     now,
+                    failure_count,
+                    next_retry_at,
+                    last_error,
+                    version,
                     code,
                 ),
             )
             return cur.rowcount > 0
+
+    def mark_preview_failure(self, code: str, error: str) -> bool:
+        row = self.lookup(code)
+        if not row:
+            return False
+        metadata = {
+            "title": row.get("preview_title") or "",
+            "description": row.get("preview_description") or "",
+            "image": "",
+        }
+        return self.update_preview_metadata(
+            code,
+            metadata,
+            row.get("preview_status") or "fallback",
+            error=error,
+        )
+
+    def preview_refresh_candidates(self, limit: int = 20, now: Optional[int] = None) -> list[dict]:
+        """Return due Threads/Instagram rows in pending, retry, then stale-ready order."""
+        now = int(time.time()) if now is None else int(now)
+        limit = max(1, min(int(limit), 200))
+        ready_before = now - PREVIEW_READY_REFRESH_SECONDS
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM urls
+                 WHERE disabled_at IS NULL
+                   AND (lower(target_url) LIKE 'https://threads.com/%'
+                        OR lower(target_url) LIKE 'https://www.threads.com/%'
+                        OR lower(target_url) LIKE 'https://threads.net/%'
+                        OR lower(target_url) LIKE 'https://www.threads.net/%'
+                        OR lower(target_url) LIKE 'https://instagram.com/%'
+                        OR lower(target_url) LIKE 'https://www.instagram.com/%')
+                   AND (
+                        preview_status IS NULL OR preview_status = '' OR preview_status = 'pending'
+                        OR (preview_status IN ('fallback', 'profile_fallback')
+                            AND (preview_next_retry_at IS NULL OR preview_next_retry_at <= ?))
+                        OR (preview_status = 'ready'
+                            AND (preview_updated_at IS NULL OR preview_updated_at <= ?))
+                   )
+                 ORDER BY CASE
+                    WHEN preview_status IS NULL OR preview_status = '' OR preview_status = 'pending' THEN 0
+                    WHEN preview_status IN ('fallback', 'profile_fallback') THEN 1
+                    ELSE 2
+                 END,
+                 COALESCE(preview_next_retry_at, preview_updated_at, created_at) ASC,
+                 created_at ASC
+                 LIMIT ?
+                """,
+                (now, ready_before, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_alert_state(self, key: str) -> Optional[dict]:
         with self.connect() as conn:
@@ -999,7 +1109,7 @@ class ShortURLApp:
         expected = hmac.new(self.admin_token.encode("utf-8"), issued_at.encode("utf-8"), hashlib.sha256).hexdigest()
         return hmac.compare_digest(digest, expected)
 
-    def _warm_preview(self, row: dict) -> None:
+    def _warm_preview(self, row: dict, force_image_refresh: bool = False) -> None:
         code = (row.get("code") or "").strip()
         target_url = (row.get("target_url") or "").strip()
         if not code or not is_social_preview_target(target_url):
@@ -1009,15 +1119,22 @@ class ShortURLApp:
         if not any((metadata.get(key) or "").strip() for key in ("title", "description", "image")):
             metadata = fetch_social_profile_fallback_metadata(target_url)
             status = "profile_fallback" if metadata else "fallback"
-        cached_path, _ = cache_preview_image(code, metadata.get("image", ""))
+        if force_image_refresh:
+            cached_path, _ = cache_preview_image(
+                code, metadata.get("image", ""), force=True
+            )
+        else:
+            cached_path, _ = cache_preview_image(code, metadata.get("image", ""))
         if status == "ready" and not (
             metadata.get("title") or metadata.get("description") or cached_path
         ):
             status = "fallback"
-        self.store.update_preview_metadata(code, metadata, status)
-        print(
-            f"preview-warm code={code} host={display_host(target_url)} status={status} image_cached={bool(cached_path)}",
-            flush=True,
+        self.store.update_preview_metadata(
+            code,
+            metadata,
+            status,
+            image_path=cached_path or "",
+            error="source metadata unavailable" if status != "ready" else "",
         )
 
     def _warm_preview_async(self, row: dict) -> None:
@@ -1223,9 +1340,10 @@ class ShortURLApp:
         if clean_path == "/meme/vitamin-c-cat.jpg" and method in {"GET", "HEAD"}:
             return self._download_public_image("./data/meme_vitamin_c_cat.jpg", "image/jpeg")
         if clean_path.startswith("/preview-image/") and method in {"GET", "HEAD"}:
-            code_with_ext = unquote(clean_path.rsplit("/", 1)[-1])
-            code = re.sub(r"\.(?:jpg|jpeg|png|webp)$", "", code_with_ext, flags=re.I)
-            if SAFE_CODE_RE.match(code):
+            encoded_filename = clean_path[len("/preview-image/"):]
+            decoded_filename = unquote(encoded_filename)
+            code = "" if "/" in decoded_filename else self._preview_code_from_filename(decoded_filename)
+            if code:
                 return self._download_preview_image(code)
         if clean_path.startswith("/go/") and method in {"GET", "HEAD"}:
             code = unquote(clean_path.rsplit("/", 1)[-1])
@@ -1247,6 +1365,14 @@ class ShortURLApp:
             return self._cors_json(204, {})
         if clean_path == "/api/public/shorten" and method == "POST":
             return self._public_create_json(body, remote_addr=remote_addr, user_agent=user_agent)
+        if clean_path.startswith("/api/public/preview-status/") and method in {"GET", "HEAD"}:
+            code = unquote(clean_path.rsplit("/", 1)[-1])
+            if not SAFE_CODE_RE.fullmatch(code or ""):
+                return self._cors_json(404, {"error": "not_found"})
+            row = self.store.lookup(code)
+            if not row or row.get("disabled_at"):
+                return self._cors_json(404, {"error": "not_found"})
+            return self._cors_json(200, self._preview_status_row(row))
         if clean_path == "/api/urls" and method == "POST":
             return self._create(headers, body)
         if clean_path == "/api/urls" and method == "GET":
@@ -1444,8 +1570,62 @@ class ShortURLApp:
         message = f"已{action}：{code}" if ok else f"找不到短碼：{code}"
         return self._html_manage(message=message, status=200 if ok else 404, token=form.get("token", ""))
 
-    def _public_row(self, row: dict) -> dict:
+    def _preview_code_from_filename(self, filename: str) -> str:
+        match = re.fullmatch(r"([A-Za-z0-9_-]{1,90})\.(jpg|jpeg|png|webp)", filename or "", re.I)
+        if not match:
+            return ""
+        stem = match.group(1)
+        if len(stem) <= 64 and SAFE_CODE_RE.fullmatch(stem) and self.store.lookup(stem):
+            return stem
+        versioned = re.fullmatch(r"([A-Za-z0-9_-]{1,64})-([0-9a-f]{12})", stem, re.I)
+        if not versioned:
+            return ""
+        code = versioned.group(1)
+        return code if self.store.lookup(code) else ""
+
+    def _preview_image_url(
+        self,
+        row: dict,
+        cached_path: str = "",
+        metadata: Optional[dict] = None,
+    ) -> str:
+        code = row.get("code") or ""
+        if not cached_path:
+            found_path, _ = _preview_image_cache_path(code)
+            cached_path = found_path or ""
+        ext = os.path.splitext(cached_path)[1].lower() if cached_path else ".png"
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            ext = ".jpg"
+        version_metadata = metadata or {
+                "title": row.get("preview_title") or "",
+                "description": row.get("preview_description") or "",
+                "image": "",
+            }
+        version = row.get("preview_version") or preview_content_version(
+            version_metadata,
+            image_path=cached_path or "",
+        )
+        return f"{self.base_url.rstrip('/')}/preview-image/{quote(code)}-{version}{ext}"
+
+    def _preview_status_row(self, row: dict) -> dict:
+        status = row.get("preview_status") or "pending"
+        cached_path = None
+        if status != "pending":
+            cached_path, _ = _preview_image_cache_path(row.get("code") or "")
+        available = bool(cached_path and os.path.isfile(cached_path)) or bool(
+            status != "pending" and self.og_image_path and os.path.isfile(self.og_image_path)
+        )
         return {
+            "code": row.get("code"),
+            "preview_status": status,
+            "preview_available": available,
+            "preview_image_url": self._preview_image_url(row) if available else None,
+            "preview_updated_at": row.get("preview_updated_at"),
+            "preview_next_retry_at": row.get("preview_next_retry_at"),
+        }
+
+    def _public_row(self, row: dict) -> dict:
+        public = {
             "code": row["code"],
             "target_url": row["target_url"],
             "title": row.get("title"),
@@ -1462,9 +1642,11 @@ class ShortURLApp:
             "target_hash": row.get("target_hash"),
             "preview_title": row.get("preview_title"),
             "preview_description": row.get("preview_description"),
-            "preview_status": row.get("preview_status"),
+            "preview_status": row.get("preview_status") or "pending",
             "preview_updated_at": row.get("preview_updated_at"),
         }
+        public.update(self._preview_status_row(row))
+        return public
 
     def _download_extension_zip(self) -> Tuple[int, Dict[str, str], bytes]:
         if not self.extension_zip_path or not os.path.exists(self.extension_zip_path):
@@ -1542,8 +1724,16 @@ class ShortURLApp:
             }
             cached_path, cached_type = _preview_image_cache_path(code)
             updated_at = int(row.get("preview_updated_at") or 0)
-            refresh_after = 7 * 24 * 60 * 60 if row.get("preview_status") == "ready" else 60 * 60
-            if not updated_at or int(time.time()) - updated_at >= refresh_after:
+            now = int(time.time())
+            due = (
+                not updated_at
+                or (row.get("preview_status") == "ready" and now - updated_at >= PREVIEW_READY_REFRESH_SECONDS)
+                or (
+                    row.get("preview_status") in {"fallback", "profile_fallback", "pending", None, ""}
+                    and int(row.get("preview_next_retry_at") or 0) <= now
+                )
+            )
+            if due:
                 self._warm_preview_async(row)
         else:
             metadata = sanitize_preview_metadata(target_url, fetch_open_graph_metadata(target_url))
@@ -1553,18 +1743,16 @@ class ShortURLApp:
         )
         title = (chosen_title or f"開啟 {host_label} 連結").strip()
         description = (chosen_description or f"透過 kuies.tw 短網址前往 {host_label}。").strip()
-        source_image_url = (metadata.get("image") or "").strip()
         if cached_path:
-            ext = os.path.splitext(cached_path)[1].lower() or ".jpg"
-            image_url = f"{self.base_url.rstrip('/')}/preview-image/{quote(code)}{ext}"
+            image_url = self._preview_image_url(row, cached_path=cached_path, metadata=metadata)
             image_type = cached_type or "image/jpeg"
         else:
             # Give every short code a stable first-party image URL even when the
             # source is private, deleted, rate-limited or serving a login wall.
             # Social platforms cache images aggressively; a shared fallback URL
             # lets one failed fetch poison previews for unrelated links.
-            image_url = source_image_url or f"{self.base_url.rstrip('/')}/preview-image/{quote(code)}.png"
-            image_type = "image/jpeg" if any(ext in image_url.lower() for ext in [".jpg", ".jpeg"]) else "image/png"
+            image_url = self._preview_image_url(row, metadata=metadata)
+            image_type = "image/png"
         safe_title = html.escape(title, quote=True)
         safe_description = html.escape(description, quote=True)
         safe_short = html.escape(short_url, quote=True)
@@ -1661,8 +1849,9 @@ class ShortURLApp:
         out_status, headers, data = self._json(status, payload)
         headers.update({
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
+            "Cache-Control": "no-store",
         })
         return out_status, headers, data
 
