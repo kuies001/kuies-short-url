@@ -518,6 +518,133 @@ class ShortURLTests(unittest.TestCase):
         self.assertEqual(cached_path, fallback_image)
         self.assertEqual(content_type, "image/jpeg")
 
+    def test_social_preview_warm_uses_public_profile_when_post_metadata_is_unavailable(self):
+        self.store.create_url(
+            "https://www.threads.com/@example_user/post/unavailable",
+            code="profilefb",
+            title="已移除追蹤參數的分享連結",
+        )
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_cache = shortener_app.cache_preview_image
+        fetched_urls = []
+        cached_image = os.path.join(self.tmp.name, "profilefb.jpg")
+        with open(cached_image, "wb") as fh:
+            fh.write(b"profile-image")
+
+        def fetch_metadata(url):
+            fetched_urls.append(url)
+            if "/post/" in url:
+                return {
+                    "title": "Threads • Log in",
+                    "description": "Log in with your Instagram.",
+                    "image": "https://static.cdninstagram.com/login.webp",
+                }
+            return {
+                "title": "範例用戶（@example_user） • Threads，暢所欲言",
+                "description": "範例用戶，分享 AI 工具與產品實戰。",
+                "image": "https://scontent.cdninstagram.com/profile.jpg",
+            }
+
+        shortener_app.fetch_open_graph_metadata = fetch_metadata
+        shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
+        try:
+            row = self.store.lookup("profilefb")
+            assert row is not None
+            app._warm_preview(row)
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.cache_preview_image = original_cache
+
+        refreshed = self.store.lookup("profilefb")
+        assert refreshed is not None
+        self.assertEqual(
+            fetched_urls,
+            [
+                "https://www.threads.com/@example_user/post/unavailable",
+                "https://www.threads.com/@example_user",
+            ],
+        )
+        self.assertEqual(refreshed["preview_status"], "profile_fallback")
+        self.assertEqual(refreshed["preview_title"], "Threads 貼文｜範例用戶（@example_user）")
+        self.assertIn("分享 AI 工具", refreshed["preview_description"])
+        status, _, body = app.handle(
+            "GET", "/profilefb", {}, b"", "8.8.8.8", "facebookexternalhit/1.1"
+        )
+        preview_html = body.decode()
+        self.assertEqual(status, 200)
+        self.assertIn('property="og:title" content="Threads 貼文｜範例用戶（@example_user）"', preview_html)
+        self.assertIn("範例用戶，分享 AI 工具與產品實戰。", preview_html)
+        self.assertNotIn("Log in with your Instagram", preview_html)
+
+    def test_social_profile_fallback_keeps_generic_fallback_when_profile_has_no_metadata(self):
+        self.store.create_url(
+            "https://www.threads.com/@missing/post/unavailable",
+            code="genericfb",
+            title="已移除追蹤參數的分享連結",
+        )
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_cache = shortener_app.cache_preview_image
+        fetched_urls = []
+        shortener_app.fetch_open_graph_metadata = lambda url: fetched_urls.append(url) or {
+            "title": "", "description": "", "image": ""
+        }
+        shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (None, None)
+        try:
+            row = self.store.lookup("genericfb")
+            assert row is not None
+            app._warm_preview(row)
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.cache_preview_image = original_cache
+
+        refreshed = self.store.lookup("genericfb")
+        assert refreshed is not None
+        self.assertEqual(refreshed["preview_status"], "fallback")
+        self.assertEqual(refreshed["preview_title"], "")
+        self.assertEqual(refreshed["preview_description"], "")
+        self.assertEqual(
+            fetched_urls,
+            [
+                "https://www.threads.com/@missing/post/unavailable",
+                "https://www.threads.com/@missing",
+            ],
+        )
+
+    def test_social_profile_fallback_never_fetches_userinfo_custom_port_or_non_post_path(self):
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        fetched_urls = []
+        shortener_app.fetch_open_graph_metadata = lambda url: fetched_urls.append(url) or {
+            "title": "不應取得",
+            "description": "不應取得",
+            "image": "",
+        }
+        try:
+            unsafe_targets = [
+                "https://evil.example@www.threads.com/@abc/post/123",
+                "https://www.threads.com:444/@abc/post/123",
+                "https://www.threads.com:notaport/@abc/post/123",
+                "http://www.threads.com/@abc/post/123",
+                "https://www.threads.com/@abc",
+                "https://www.threads.com/@abc/other/123",
+            ]
+            for target in unsafe_targets:
+                self.assertEqual(shortener_app.fetch_social_profile_fallback_metadata(target), {})
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+        self.assertEqual(fetched_urls, [])
+
     def test_warmed_social_preview_is_served_without_live_source_fetch(self):
         self.store.create_url("https://www.threads.com/@abc/post/warmed", code="warm", title="已移除追蹤參數的分享連結")
         app = create_app(

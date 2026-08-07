@@ -513,6 +513,48 @@ def sanitize_preview_metadata(target_url: str, metadata: dict) -> dict:
     return metadata
 
 
+def fetch_social_profile_fallback_metadata(target_url: str) -> dict:
+    """Use a Threads profile card when an individual post cannot be read publicly.
+
+    Threads occasionally redirects a valid-looking post URL to ``invalid_post`` or
+    serves a login wall to crawlers.  Returning only ``Threads 貼文`` makes Messenger
+    cache a useless card.  A public profile still provides a stable author name,
+    description and image without pretending that we recovered the missing post text.
+    """
+    try:
+        parsed = urlparse(target_url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+        post_match = re.fullmatch(r"/@([A-Za-z0-9._]+)/post/[^/?#]+/?", parsed.path)
+    except (TypeError, ValueError):
+        return {}
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.username
+        or parsed.password
+        or port
+        or host not in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
+        or not post_match
+    ):
+        return {}
+    handle = f"@{post_match.group(1)}"
+    # Never reuse scheme/netloc from stored input: the fallback may only fetch this
+    # canonical public Threads origin, not userinfo, custom ports or another domain.
+    profile_url = f"https://www.threads.com/{handle}"
+    profile = sanitize_preview_metadata(profile_url, fetch_open_graph_metadata(profile_url))
+    if not any((profile.get(key) or "").strip() for key in ("title", "description", "image")):
+        return {}
+    raw_title = (profile.get("title") or "").strip()
+    profile_name = re.split(r"\s*[•·]\s*Threads\b", raw_title, maxsplit=1, flags=re.I)[0].strip()
+    if not profile_name:
+        profile_name = handle
+    return {
+        "title": f"Threads 貼文｜{profile_name}",
+        "description": (profile.get("description") or "").strip(),
+        "image": (profile.get("image") or "").strip(),
+    }
+
+
 def _preview_image_extension(content_type: str, image_url: str = "") -> tuple[str, str]:
     content_type = (content_type or "").split(";", 1)[0].strip().lower()
     if content_type in {"image/jpeg", "image/jpg"}:
@@ -963,8 +1005,15 @@ class ShortURLApp:
         if not code or not is_social_preview_target(target_url):
             return
         metadata = sanitize_preview_metadata(target_url, fetch_open_graph_metadata(target_url))
+        status = "ready"
+        if not any((metadata.get(key) or "").strip() for key in ("title", "description", "image")):
+            metadata = fetch_social_profile_fallback_metadata(target_url)
+            status = "profile_fallback" if metadata else "fallback"
         cached_path, _ = cache_preview_image(code, metadata.get("image", ""))
-        status = "ready" if metadata and (metadata.get("title") or metadata.get("description") or cached_path) else "fallback"
+        if status == "ready" and not (
+            metadata.get("title") or metadata.get("description") or cached_path
+        ):
+            status = "fallback"
         self.store.update_preview_metadata(code, metadata, status)
         print(
             f"preview-warm code={code} host={display_host(target_url)} status={status} image_cached={bool(cached_path)}",
