@@ -100,7 +100,7 @@ https://u.kuies.tw/downloads/threads-link-cleaner.zip
 
 功能：
 
-- 目前版本：`1.7.1`。
+- 目前版本：`1.7.3`。
 - 點開擴充後有一個自動模式開關與兩個手動按鈕：
   - `自動去除追蹤並縮短`：開啟後，在 Threads、Facebook 與 IG 點「複製連結」時，會攔截頁面剪貼簿寫入；Threads 新版 `/share/<token>` 與 Facebook `/share/p/<token>` 等包裝網址會先解析成真正貼文網址，再移除 `xmt`、`slof`、`fbclid`、`mibextid`、`rdid`、`share_url` 等追蹤參數、建立 `u.kuies.tw` 短網址並寫回剪貼簿。
   - 關閉自動模式：保持原先手動功能，不主動攔截 Threads / Facebook / IG 複製連結。

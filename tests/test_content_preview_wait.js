@@ -34,10 +34,25 @@ async function main() {
     },
   };
   let statusCalls = 0;
+  let shortenCalls = 0;
+  let previewAlwaysPending = false;
   const fetch = async (url) => {
+    if (String(url).includes('/api/public/shorten')) {
+      shortenCalls += 1;
+      return {
+        ok: true,
+        async json() {
+          return {
+            short_url: 'https://u.kuies.tw/Fst',
+            preview_status: 'pending',
+            preview_available: false,
+          };
+        },
+      };
+    }
     if (String(url).includes('/preview-status/')) {
       statusCalls += 1;
-      const ready = statusCalls >= 3;
+      const ready = !previewAlwaysPending && statusCalls >= 3;
       return {
         ok: true,
         async json() {
@@ -93,7 +108,18 @@ async function main() {
   assert(timeoutResult === shortUrl, '逾時不得降級回長網址');
   assert(timeoutResult !== 'https://www.threads.com/@a/post/1', '逾時結果不可是長網址');
 
-  process.stdout.write('preview-wait-and-short-url-timeout: ok\n');
+  previewAlwaysPending = true;
+  statusCalls = 0;
+  shortenCalls = 0;
+  const startedAt = Date.now();
+  const firstCopyResult = await api.shortenUrl('https://www.threads.com/@a/post/1?xmt=tracking');
+  const elapsedMs = Date.now() - startedAt;
+  assert(firstCopyResult === 'https://u.kuies.tw/Fst', '第一次複製必須直接回傳 API 建立的短網址');
+  assert(shortenCalls === 1, `縮網址 API 應只呼叫一次，實際 ${shortenCalls} 次`);
+  assert(statusCalls === 0, `複製主流程不可等待 preview-status，實際呼叫 ${statusCalls} 次`);
+  assert(elapsedMs < 200, `縮網址 API 已回應後不應再等待預覽，實際耗時 ${elapsedMs}ms`);
+
+  process.stdout.write('preview-wait-is-background-and-first-copy-is-fast: ok\n');
 }
 
 main().catch((error) => {

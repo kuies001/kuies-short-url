@@ -198,7 +198,7 @@ class PreviewResilienceTests(unittest.TestCase):
         script = os.path.join(ROOT, "tests", "test_content_preview_wait.js")
         result = subprocess.run(["node", script], capture_output=True, text=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 0, msg=f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
-        self.assertIn("preview-wait-and-short-url-timeout: ok", result.stdout)
+        self.assertIn("preview-wait-is-background-and-first-copy-is-fast: ok", result.stdout)
 
 
 if __name__ == "__main__":

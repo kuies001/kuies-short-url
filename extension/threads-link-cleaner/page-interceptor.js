@@ -17,9 +17,9 @@
 
   function dispatchReady() {
     window.dispatchEvent(new CustomEvent('kuies-tracking-cleaner-ready', {
-      detail: { ready: true, version: '1.7.1' },
+      detail: { ready: true, version: '1.7.3' },
     }));
-    postBridge('ready', { ready: true, version: '1.7.1' });
+    postBridge('ready', { ready: true, version: '1.7.3' });
   }
 
   if (window.__kuiesTrackingCleanerInstalled) {

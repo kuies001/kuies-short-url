@@ -176,9 +176,10 @@ async function shortenUrl(url) {
   if (!response.ok || !data.short_url) {
     throw new Error(data.error || 'shorten_failed');
   }
-  return waitForPreview(data.short_url, data.preview_status, {
-    initialAvailable: Boolean(data.preview_available),
-  });
+
+  // 複製成功只取決於公開 shorten API；伺服器的 fast_response 會自行背景暖機。
+  // 不在剪貼簿流程輪詢 preview-status，避免與 page-interceptor 的保護計時器競跑。
+  return data.short_url;
 }
 
 async function replaceClipboardWithShortUrl(cleanedUrl) {

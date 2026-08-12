@@ -75,7 +75,7 @@ No, I am not using remote code.
 
 ## 素材檔案
 
-- 擴充上傳 ZIP：dist/threads-link-cleaner-cws-1.7.1.zip
+- 擴充上傳 ZIP：static/downloads/threads-link-cleaner-cws.zip（目前版本 1.7.3）
 - 小型宣傳圖：store-assets/promo-small-440x280.png
 - 截圖一：store-assets/screenshot-1280x800.png
 - 截圖二：store-assets/screenshot-clean-share-1280x800.png

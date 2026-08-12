@@ -1167,7 +1167,7 @@ class ShortURLTests(unittest.TestCase):
             page = fh.read()
         combined = "\n".join([content, popup, page, json.dumps(manifest)])
 
-        self.assertEqual(manifest["version"], "1.7.2")
+        self.assertEqual(manifest["version"], "1.7.3")
         self.assertIn("https://u.kuies.tw/*", manifest["host_permissions"])
         self.assertIn("https://www.facebook.com/*", manifest["host_permissions"])
         self.assertNotIn("192.168.", combined)
@@ -1198,6 +1198,25 @@ class ShortURLTests(unittest.TestCase):
             msg=f"Node regression test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
         )
         self.assertIn("first-copy-short-url-and-facebook-share: ok", result.stdout)
+
+    def test_page_interceptor_first_copy_does_not_wait_for_preview_timeout(self):
+        script_path = os.path.join(
+            os.path.dirname(__file__),
+            "test_page_interceptor_timeout_race.js",
+        )
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"Node timeout race regression test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
+        )
+        self.assertIn("first-copy-timeout-race-and-api-fallback: ok", result.stdout)
 
     def test_page_interceptor_preserves_threads_native_close_and_only_handles_real_copy(self):
         script_path = os.path.join(
