@@ -500,13 +500,72 @@ def is_social_login_metadata(host_label: str, metadata: dict) -> bool:
     """Detect login-wall OG metadata so we do not publish it as the short URL preview."""
     if host_label not in {"Threads", "Instagram"}:
         return False
-    title = (metadata.get("title") or "").strip().lower()
-    description = (metadata.get("description") or "").strip().lower()
-    image = (metadata.get("image") or "").strip().lower()
-    login_title = bool(re.search(r"(log\s*in|登入|login)", title, re.I))
-    login_description = bool(re.search(r"(log\s*in|登入|使用你的 instagram 登入)", description, re.I))
-    login_image = "static.cdninstagram.com" in image
-    return login_title and (login_description or login_image)
+    title = re.sub(r"\s+", " ", (metadata.get("title") or "").strip()).casefold()
+    description = re.sub(r"\s+", " ", (metadata.get("description") or "").strip()).casefold()
+    login_title = bool(
+        re.fullmatch(
+            r"(?:(?:threads|instagram)\s*(?:[•·|｜:：-]\s*)?)?(?:log\s*in|login|登入)(?:\s*[•·|｜].*)?",
+            title,
+            re.I,
+        )
+    )
+    login_description = bool(
+        re.search(
+            r"(?:use|using)\s+(?:your\s+)?instagram\s+(?:account\s+)?to\s+log\s*in|"
+            r"log\s*in\s+(?:with|using)\s+(?:your\s+)?instagram|使用你的\s*instagram\s*登入",
+            description,
+            re.I,
+        )
+    )
+    return login_title or login_description
+
+
+def is_social_login_image_url(image_url: str) -> bool:
+    """Reject known Threads/Instagram login-wall artwork independently of its title."""
+    image = (image_url or "").strip().lower()
+    if not image:
+        return False
+    try:
+        host = (urlparse(image).hostname or "").lower()
+    except ValueError:
+        return True
+    return host == "static.cdninstagram.com" or host.endswith(".static.cdninstagram.com")
+
+
+def _is_generic_or_login_social_title(host_label: str, title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (title or "").strip()).casefold()
+    generic = {
+        host_label.casefold(),
+        f"{host_label} 貼文".casefold(),
+    }
+    return normalized in generic or is_social_login_metadata(host_label, {"title": title})
+
+
+def social_preview_quality_issues(
+    target_url: str,
+    metadata: dict,
+    image_path: str = "",
+    require_image: bool = True,
+) -> list[str]:
+    """Return stable quality defects used by warmup, refresh and health checks."""
+    if not is_social_preview_target(target_url):
+        return []
+    host_label = display_host(target_url)
+    title = (metadata.get("title") or "").strip()
+    description = (metadata.get("description") or "").strip()
+    image_url = (metadata.get("image") or "").strip()
+    issues: list[str] = []
+    if _is_generic_or_login_social_title(host_label, title):
+        issues.append("generic_or_login_title")
+    if is_social_login_metadata(host_label, metadata):
+        issues.append("login_wall_metadata")
+    if is_social_login_image_url(image_url):
+        issues.append("login_wall_image")
+    if not title and not description:
+        issues.append("missing_text")
+    if require_image and not (image_path and os.path.isfile(image_path) and os.path.getsize(image_path) > 0):
+        issues.append("missing_image")
+    return list(dict.fromkeys(issues))
 
 
 def sanitize_preview_metadata(target_url: str, metadata: dict) -> dict:
@@ -514,7 +573,10 @@ def sanitize_preview_metadata(target_url: str, metadata: dict) -> dict:
     host_label = display_host(target_url)
     if is_social_login_metadata(host_label, metadata):
         return {}
-    return metadata
+    sanitized = dict(metadata)
+    if host_label in {"Threads", "Instagram"} and is_social_login_image_url(sanitized.get("image") or ""):
+        sanitized["image"] = ""
+    return sanitized
 
 
 def fetch_social_profile_fallback_metadata(target_url: str) -> dict:
@@ -975,7 +1037,7 @@ class ShortURLStore:
         )
 
     def preview_refresh_candidates(self, limit: int = 20, now: Optional[int] = None) -> list[dict]:
-        """Return due Threads/Instagram rows in pending, retry, then stale-ready order."""
+        """Return pending, degraded, retry-due and stale social rows in repair order."""
         now = int(time.time()) if now is None else int(now)
         limit = max(1, min(int(limit), 200))
         ready_before = now - PREVIEW_READY_REFRESH_SECONDS
@@ -990,25 +1052,40 @@ class ShortURLStore:
                         OR lower(target_url) LIKE 'https://www.threads.net/%'
                         OR lower(target_url) LIKE 'https://instagram.com/%'
                         OR lower(target_url) LIKE 'https://www.instagram.com/%')
-                   AND (
-                        preview_status IS NULL OR preview_status = '' OR preview_status = 'pending'
-                        OR (preview_status IN ('fallback', 'profile_fallback')
-                            AND (preview_next_retry_at IS NULL OR preview_next_retry_at <= ?))
-                        OR (preview_status = 'ready'
-                            AND (preview_updated_at IS NULL OR preview_updated_at <= ?))
-                   )
-                 ORDER BY CASE
-                    WHEN preview_status IS NULL OR preview_status = '' OR preview_status = 'pending' THEN 0
-                    WHEN preview_status IN ('fallback', 'profile_fallback') THEN 1
-                    ELSE 2
-                 END,
-                 COALESCE(preview_next_retry_at, preview_updated_at, created_at) ASC,
-                 created_at ASC
-                 LIMIT ?
                 """,
-                (now, ready_before, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        candidates = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            status = row.get("preview_status") or "pending"
+            cached_path, _ = _preview_image_cache_path(row.get("code") or "")
+            metadata = {
+                "title": row.get("preview_title") or "",
+                "description": row.get("preview_description") or "",
+                "image": "",
+            }
+            degraded = bool(
+                social_preview_quality_issues(
+                    row.get("target_url") or "",
+                    metadata,
+                    image_path=cached_path or "",
+                    require_image=True,
+                )
+            )
+            if status == "pending":
+                priority = 0
+            elif status in {"fallback", "profile_fallback"} and int(row.get("preview_next_retry_at") or 0) <= now:
+                priority = 1
+            elif status in {"ready", "profile_fallback"} and degraded:
+                priority = 2
+            elif status == "ready" and int(row.get("preview_updated_at") or 0) <= ready_before:
+                priority = 3
+            else:
+                continue
+            age_key = int(row.get("preview_next_retry_at") or row.get("preview_updated_at") or row.get("created_at") or 0)
+            candidates.append((priority, age_key, int(row.get("created_at") or 0), row))
+        candidates.sort(key=lambda item: item[:3])
+        return [item[3] for item in candidates[:limit]]
 
     def get_alert_state(self, key: str) -> Optional[dict]:
         with self.connect() as conn:
@@ -1114,27 +1191,58 @@ class ShortURLApp:
         target_url = (row.get("target_url") or "").strip()
         if not code or not is_social_preview_target(target_url):
             return
+        existing_metadata = {
+            "title": row.get("preview_title") or "",
+            "description": row.get("preview_description") or "",
+            "image": "",
+        }
+        existing_cached_path, _ = _preview_image_cache_path(code)
+        existing_status = row.get("preview_status") or ""
+        existing_is_healthy = existing_status in {"ready", "profile_fallback"} and not social_preview_quality_issues(
+            target_url,
+            existing_metadata,
+            image_path=existing_cached_path or "",
+            require_image=True,
+        )
+
         metadata = sanitize_preview_metadata(target_url, fetch_open_graph_metadata(target_url))
         status = "ready"
-        if not any((metadata.get(key) or "").strip() for key in ("title", "description", "image")):
-            metadata = fetch_social_profile_fallback_metadata(target_url)
-            status = "profile_fallback" if metadata else "fallback"
-        if force_image_refresh:
+        preserve_existing = False
+        source_issues = social_preview_quality_issues(target_url, metadata, require_image=False)
+        if source_issues:
+            metadata = sanitize_preview_metadata(target_url, fetch_social_profile_fallback_metadata(target_url))
+            profile_issues = social_preview_quality_issues(target_url, metadata, require_image=False)
+            if profile_issues and existing_is_healthy:
+                metadata = existing_metadata
+                status = existing_status
+                preserve_existing = True
+            elif profile_issues:
+                metadata = {}
+                status = "fallback"
+            else:
+                status = "profile_fallback"
+        if preserve_existing:
+            cached_path = existing_cached_path
+        elif force_image_refresh:
             cached_path, _ = cache_preview_image(
                 code, metadata.get("image", ""), force=True
             )
         else:
             cached_path, _ = cache_preview_image(code, metadata.get("image", ""))
-        if status == "ready" and not (
-            metadata.get("title") or metadata.get("description") or cached_path
-        ):
+        final_issues = social_preview_quality_issues(
+            target_url,
+            metadata,
+            image_path=cached_path or "",
+            require_image=True,
+        )
+        if status in {"ready", "profile_fallback"} and final_issues:
             status = "fallback"
         self.store.update_preview_metadata(
             code,
             metadata,
             status,
             image_path=cached_path or "",
-            error="source metadata unavailable" if status != "ready" else "",
+            error=("preview quality: " + ",".join(final_issues)) if status == "fallback" else "",
         )
 
     def _warm_preview_async(self, row: dict) -> None:

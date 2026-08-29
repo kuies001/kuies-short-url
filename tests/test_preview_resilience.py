@@ -138,6 +138,138 @@ class PreviewResilienceTests(unittest.TestCase):
         self.assertEqual(data["preview_status"], "pending")
         self.assertFalse(data["preview_available"])
 
+    def test_social_preview_quality_rejects_generic_titles_and_login_wall_images(self):
+        threads_url = "https://www.threads.com/@a/post/quality"
+        instagram_url = "https://www.instagram.com/p/quality/"
+        for target_url, title in (
+            (threads_url, "Threads"),
+            (threads_url, "Threads 貼文"),
+            (instagram_url, "Instagram"),
+            (instagram_url, "Instagram 貼文"),
+            (threads_url, "Threads • Log in"),
+            (instagram_url, "Instagram 登入"),
+        ):
+            with self.subTest(title=title):
+                issues = shortener_app.social_preview_quality_issues(
+                    target_url,
+                    {"title": title, "description": "", "image": ""},
+                    require_image=False,
+                )
+                self.assertIn("generic_or_login_title", issues)
+
+        sanitized = shortener_app.sanitize_preview_metadata(
+            threads_url,
+            {
+                "title": "真人貼文內容",
+                "description": "可用摘要",
+                "image": "https://static.cdninstagram.com/rsrc.php/login-wall.webp",
+            },
+        )
+        self.assertEqual(sanitized["title"], "真人貼文內容")
+        self.assertEqual(sanitized["description"], "可用摘要")
+        self.assertEqual(sanitized["image"], "")
+
+    def test_warm_preview_never_marks_generic_metadata_as_ready_or_profile_fallback(self):
+        self.store.create_url("https://www.threads.com/@a/post/generic", code="generic")
+        app = create_app(self.store, "https://u.kuies.tw", "secret", preview_warm_enabled=True)
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_profile = shortener_app.fetch_social_profile_fallback_metadata
+        original_cache = shortener_app.cache_preview_image
+        try:
+            shortener_app.fetch_open_graph_metadata = lambda url: {
+                "title": "Threads 貼文",
+                "description": "",
+                "image": "https://static.cdninstagram.com/login-wall.webp",
+            }
+            shortener_app.fetch_social_profile_fallback_metadata = lambda url: {
+                "title": "Threads 貼文",
+                "description": "",
+                "image": "",
+            }
+            shortener_app.cache_preview_image = lambda *args, **kwargs: (None, None)
+            app._warm_preview(self.store.lookup("generic"))
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.fetch_social_profile_fallback_metadata = original_profile
+            shortener_app.cache_preview_image = original_cache
+        row = self.store.lookup("generic")
+        self.assertEqual(row["preview_status"], "fallback")
+        self.assertNotIn(row["preview_status"], {"ready", "profile_fallback"})
+
+    def test_refresh_and_health_repair_degraded_ready_rows(self):
+        worker = load_worker_module()
+        now = int(time.time())
+        image_dir = shortener_app.preview_image_dir()
+        os.makedirs(image_dir, exist_ok=True)
+        image_path = os.path.join(image_dir, "degraded.jpg")
+        with open(image_path, "wb") as fh:
+            fh.write(b"image")
+        self.store.create_url("https://www.threads.com/@a/post/degraded", code="degraded")
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE urls SET preview_status='ready', preview_title='Threads 貼文', "
+                "preview_description='', preview_updated_at=?, preview_version='deadbeef0000' WHERE code='degraded'",
+                (now,),
+            )
+
+        selected = self.store.preview_refresh_candidates(limit=20, now=now)
+        self.assertIn("degraded", [row["code"] for row in selected])
+        health = worker.health_statistics(
+            self.db_path,
+            now=now,
+            image_probe=lambda code, path, content_type: False,
+        )
+        self.assertEqual(health["degraded_metadata"], 1)
+        self.assertEqual(health["broken_images"], 1)
+        self.assertEqual(health["repair_candidates"], 1)
+
+    def test_health_detects_long_pending_as_repair_candidate(self):
+        worker = load_worker_module()
+        now = int(time.time())
+        self.store.create_url("https://www.instagram.com/p/stuck/", code="stuck")
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE urls SET preview_status='pending', created_at=?, updated_at=? WHERE code='stuck'",
+                (now - worker.HEALTH_LONG_PENDING_SECONDS - 1, now - worker.HEALTH_LONG_PENDING_SECONDS - 1),
+            )
+        health = worker.health_statistics(self.db_path, now=now)
+        self.assertEqual(health["long_pending"], 1)
+        self.assertEqual(health["repair_candidates"], 1)
+
+    def test_refresh_preserves_existing_valid_profile_fallback_on_transient_login_wall(self):
+        self.store.create_url("https://www.threads.com/@example_profile/post/PT", code="keepPT")
+        image_dir = shortener_app.preview_image_dir()
+        os.makedirs(image_dir, exist_ok=True)
+        image_path = os.path.join(image_dir, "keepPT.jpg")
+        with open(image_path, "wb") as fh:
+            fh.write(b"valid-profile-image")
+        existing = {
+            "title": "Threads 貼文｜範例帳號（@example_profile）",
+            "description": "公開個人檔案摘要",
+            "image": "",
+        }
+        self.store.update_preview_metadata("keepPT", existing, "profile_fallback", image_path=image_path)
+        app = create_app(self.store, "https://u.kuies.tw", "secret", preview_warm_enabled=True)
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_profile = shortener_app.fetch_social_profile_fallback_metadata
+        original_cache = shortener_app.cache_preview_image
+        try:
+            shortener_app.fetch_open_graph_metadata = lambda url: {
+                "title": "Threads • 登入",
+                "description": "使用你的 Instagram 登入",
+                "image": "https://static.cdninstagram.com/login.webp",
+            }
+            shortener_app.fetch_social_profile_fallback_metadata = lambda url: {}
+            shortener_app.cache_preview_image = lambda *args, **kwargs: (None, None)
+            app._warm_preview(self.store.lookup("keepPT"), force_image_refresh=True)
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.fetch_social_profile_fallback_metadata = original_profile
+            shortener_app.cache_preview_image = original_cache
+        row = self.store.lookup("keepPT")
+        self.assertEqual(row["preview_status"], "profile_fallback")
+        self.assertEqual(row["preview_title"], existing["title"])
+
     def test_worker_priority_batch_dry_run_and_silent_success(self):
         worker = load_worker_module()
         now = int(time.time())
