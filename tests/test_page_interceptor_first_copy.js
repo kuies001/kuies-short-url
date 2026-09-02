@@ -130,6 +130,34 @@ async function main() {
   assert(clipboard.writes.length === 2, 'Facebook 複製流程也只能新增一次最終剪貼簿寫入');
   assert(clipboard.writes[1] === shortUrl, 'Facebook 複製流程應寫入自己的短網址');
 
+  // Facebook 網頁的「複製連結」不一定走 Clipboard.writeText；部分介面只觸發原生 copy event。
+  // `/share/p/` 沒有 query，所以清理前後字串相同，但仍必須送去後端解析包裝網址並縮短。
+  const nativeFacebookShareUrl = 'https://www.facebook.com/share/p/18SWiJaf3C/';
+  let nativePrevented = false;
+  const nativeClipboardWrites = [];
+  documentTarget.dispatchEvent({
+    type: 'copy',
+    isTrusted: true,
+    clipboardData: {
+      getData(type) {
+        return type === 'text/plain' ? nativeFacebookShareUrl : '';
+      },
+      setData(type, value) {
+        nativeClipboardWrites.push({ type, value });
+      },
+    },
+    preventDefault() {
+      nativePrevented = true;
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const nativeCopyMessages = bridgeMessages.filter((message) => message && message.action === 'copy');
+  assert(nativeCopyMessages.length >= 1, 'Facebook 原生 copy event 即使網址無 query，也必須觸發縮址橋接');
+  assert(nativeCopyMessages.at(-1).detail.cleanedUrl === nativeFacebookShareUrl,
+    'Facebook `/share/p/` 包裝網址必須原樣送交後端解析');
+  assert(!nativePrevented && nativeClipboardWrites.length === 0,
+    '網址未改寫時不可同步阻擋 Facebook 原生複製；縮網址由非同步橋接覆寫最終剪貼簿');
+
   process.stdout.write('first-copy-short-url-and-facebook-share: ok\n');
 }
 

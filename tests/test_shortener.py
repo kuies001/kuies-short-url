@@ -1167,7 +1167,7 @@ class ShortURLTests(unittest.TestCase):
             page = fh.read()
         combined = "\n".join([content, popup, page, json.dumps(manifest)])
 
-        self.assertEqual(manifest["version"], "1.7.3")
+        self.assertEqual(manifest["version"], "1.7.4")
         self.assertIn("https://u.kuies.tw/*", manifest["host_permissions"])
         self.assertIn("https://www.facebook.com/*", manifest["host_permissions"])
         self.assertNotIn("192.168.", combined)

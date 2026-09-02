@@ -17,9 +17,9 @@
 
   function dispatchReady() {
     window.dispatchEvent(new CustomEvent('kuies-tracking-cleaner-ready', {
-      detail: { ready: true, version: '1.7.3' },
+      detail: { ready: true, version: '1.7.4' },
     }));
-    postBridge('ready', { ready: true, version: '1.7.3' });
+    postBridge('ready', { ready: true, version: '1.7.4' });
   }
 
   if (window.__kuiesTrackingCleanerInstalled) {
@@ -236,10 +236,14 @@
     }
     TRACKING_URL_RE.lastIndex = 0;
     const cleaned = cleanText(source);
-    if (!cleaned || cleaned === source) return;
-    event.preventDefault();
-    event.clipboardData.setData('text/plain', cleaned);
-    event.clipboardData.setData('text/html', cleaned);
+    if (!cleaned) return;
+    if (cleaned !== source) {
+      event.preventDefault();
+      event.clipboardData.setData('text/plain', cleaned);
+      event.clipboardData.setData('text/html', cleaned);
+    }
+    // Facebook `/share/.../` 可能沒有 query 可刪，cleaned 會等於 source；
+    // 仍須送交後端解析包裝網址並縮短，不能因字串未變而提前結束。
     notifyShorten(cleaned);
   }, true);
 
