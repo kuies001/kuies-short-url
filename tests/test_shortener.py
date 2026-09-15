@@ -31,8 +31,16 @@ class ShortURLTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "shorturls.sqlite3")
         self.store = ShortURLStore(self.db_path)
+        self.original_preview_dir = shortener_app.PREVIEW_IMAGE_DIR
+        self.original_fallback_preview_dir = shortener_app.FALLBACK_PREVIEW_IMAGE_DIR
+        shortener_app.PREVIEW_IMAGE_DIR = os.path.join(self.tmp.name, "preview-images")
+        shortener_app.FALLBACK_PREVIEW_IMAGE_DIR = os.path.join(self.tmp.name, "fallback-images")
+        os.makedirs(shortener_app.PREVIEW_IMAGE_DIR, exist_ok=True)
+        os.makedirs(shortener_app.FALLBACK_PREVIEW_IMAGE_DIR, exist_ok=True)
 
     def tearDown(self):
+        shortener_app.PREVIEW_IMAGE_DIR = self.original_preview_dir
+        shortener_app.FALLBACK_PREVIEW_IMAGE_DIR = self.original_fallback_preview_dir
         self.tmp.cleanup()
 
     def test_make_code_is_short_and_url_safe(self):
@@ -435,7 +443,7 @@ class ShortURLTests(unittest.TestCase):
             "description": "原站文章摘要",
             "image": "https://cdn.example.com/card.jpg",
         }
-        cached_image = os.path.join(self.tmp.name, "gen1.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "gen1.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"fake-jpeg")
         shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
@@ -533,7 +541,7 @@ class ShortURLTests(unittest.TestCase):
         original_fetch = shortener_app.fetch_open_graph_metadata
         original_cache = shortener_app.cache_preview_image
         fetched_urls = []
-        cached_image = os.path.join(self.tmp.name, "profilefb.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "profilefb.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"profile-image")
 
@@ -655,7 +663,7 @@ class ShortURLTests(unittest.TestCase):
         )
         original_fetch = shortener_app.fetch_open_graph_metadata
         original_cache = shortener_app.cache_preview_image
-        cached_image = os.path.join(self.tmp.name, "warm.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "warm.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"cached-image")
         shortener_app.fetch_open_graph_metadata = lambda url: {
@@ -690,7 +698,7 @@ class ShortURLTests(unittest.TestCase):
             "description": "原始 Threads 貼文內容摘要",
             "image": "https://instagram.examplecdn.test/original.jpg?x=1&y=2",
         }
-        cached_image = os.path.join(self.tmp.name, "th1.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "th1.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"fake-jpeg")
         shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
@@ -736,7 +744,7 @@ class ShortURLTests(unittest.TestCase):
             "description": "這才是真正想讓 Messenger 顯示的貼文內容",
             "image": "https://instagram.examplecdn.test/original.jpg",
         }
-        cached_image = os.path.join(self.tmp.name, "th2.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "th2.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"fake-jpeg")
         shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
@@ -895,7 +903,7 @@ class ShortURLTests(unittest.TestCase):
         )
         original_fetch = shortener_app.fetch_open_graph_metadata
         original_cache = shortener_app.cache_preview_image
-        cached_image = os.path.join(self.tmp.name, "race.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "racex.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"cached-image")
 
@@ -912,6 +920,7 @@ class ShortURLTests(unittest.TestCase):
         try:
             payload = json.dumps({
                 "url": "https://www.threads.com/@abc/post/preview-race?xmt=tracking",
+                "code": "racex",
                 "clean_tracking": True,
             }).encode()
             started = time.monotonic()
@@ -944,7 +953,7 @@ class ShortURLTests(unittest.TestCase):
         )
         original_fetch = shortener_app.fetch_open_graph_metadata
         original_cache = shortener_app.cache_preview_image
-        cached_image = os.path.join(self.tmp.name, "fast-race.jpg")
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "fast-race.jpg")
         with open(cached_image, "wb") as fh:
             fh.write(b"cached-image")
 
@@ -986,6 +995,206 @@ class ShortURLTests(unittest.TestCase):
         self.assertLess(elapsed, 0.12)
         self.assertTrue(data["short_url"].startswith("https://u.kuies.tw/"))
         self.assertEqual(self.store.lookup(data["code"])["preview_status"], "ready")
+
+    def test_fast_response_first_meta_crawler_waits_for_background_preview(self):
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        app.preview_crawler_wait_seconds = 1.0
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_cache = shortener_app.cache_preview_image
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "firstm.jpg")
+        with open(cached_image, "wb") as fh:
+            fh.write(b"cached-image")
+
+        def delayed_metadata(url):
+            time.sleep(0.25)
+            return {
+                "title": "Threads 上的範例作者（@example_author）",
+                "description": "Messenger 第一次抓取就應看到的貼文內容",
+                "image": "https://scontent.cdninstagram.com/first-meta.jpg",
+            }
+
+        shortener_app.fetch_open_graph_metadata = delayed_metadata
+        shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
+        try:
+            payload = json.dumps({
+                "url": "https://www.threads.com/@example_author/post/first-meta?xmt=tracking",
+                "code": "firstm",
+                "clean_tracking": True,
+                "fast_response": True,
+            }).encode()
+            post_started = time.monotonic()
+            post_status, _, post_body = app.handle(
+                "POST",
+                "/api/public/shorten",
+                {"content-type": "application/json"},
+                payload,
+                "8.8.8.8",
+                "extension-test",
+            )
+            post_elapsed = time.monotonic() - post_started
+            data = json.loads(post_body.decode())
+
+            crawler_status, _, crawler_body = app.handle(
+                "GET",
+                f"/{data['code']}",
+                {},
+                b"",
+                "8.8.8.8",
+                "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+            )
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                row = self.store.lookup(data["code"])
+                if row and row.get("preview_status") == "ready":
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("快速回應後的背景預覽暖機沒有完成")
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.cache_preview_image = original_cache
+
+        preview_html = crawler_body.decode()
+        self.assertEqual(post_status, 201)
+        self.assertLess(post_elapsed, 0.12)
+        self.assertEqual(data["preview_status"], "pending")
+        self.assertEqual(crawler_status, 200)
+        self.assertIn(
+            'property="og:title" content="Messenger 第一次抓取就應看到的貼文內容"',
+            preview_html,
+        )
+        self.assertNotIn('property="og:title" content="Threads 貼文｜@example_author"', preview_html)
+        final_row = self.store.lookup(data["code"])
+        assert final_row is not None
+        self.assertEqual(final_row["preview_status"], "ready")
+
+    def test_pending_preview_timeout_returns_retryable_status_without_fallback_card(self):
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        app.preview_crawler_wait_seconds = 0.04
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_cache = shortener_app.cache_preview_image
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "late-meta.jpg")
+        with open(cached_image, "wb") as fh:
+            fh.write(b"cached-image")
+
+        def delayed_metadata(url):
+            time.sleep(0.2)
+            return {
+                "title": "Threads 上的範例作者（@example_author）",
+                "description": "稍後完成的預覽",
+                "image": "https://scontent.cdninstagram.com/late-meta.jpg",
+            }
+
+        shortener_app.fetch_open_graph_metadata = delayed_metadata
+        shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
+        try:
+            payload = json.dumps({
+                "url": "https://www.threads.com/@example_author/post/late-meta?xmt=tracking",
+                "clean_tracking": True,
+                "fast_response": True,
+            }).encode()
+            _, _, post_body = app.handle(
+                "POST",
+                "/api/public/shorten",
+                {"content-type": "application/json"},
+                payload,
+                "8.8.8.8",
+                "extension-test",
+            )
+            code = json.loads(post_body.decode())["code"]
+            crawler_status, crawler_headers, crawler_body = app.handle(
+                "GET",
+                f"/{code}",
+                {},
+                b"",
+                "8.8.8.8",
+                "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+            )
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                row = self.store.lookup(code)
+                if row and row.get("preview_status") == "ready":
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("逾時回應後的背景預覽暖機沒有完成")
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.cache_preview_image = original_cache
+
+        self.assertEqual(crawler_status, 503)
+        self.assertEqual(crawler_headers["Retry-After"], "2")
+        self.assertEqual(crawler_headers["Cache-Control"], "no-store")
+        self.assertNotIn(b"og:title", crawler_body)
+        self.assertNotIn("Threads 貼文｜@example_author", crawler_body.decode())
+
+    def test_degraded_social_preview_waits_before_first_crawler_card(self):
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        app.preview_crawler_wait_seconds = 1.0
+        target_url = "https://www.threads.com/@example_author/post/degraded-crawler"
+        self.store.create_url(target_url, code="degraded-crawler")
+        self.store.update_preview_metadata(
+            "degraded-crawler",
+            {"title": "Threads 貼文", "description": "", "image": ""},
+            "fallback",
+        )
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_cache = shortener_app.cache_preview_image
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "degraded-crawler.jpg")
+        with open(cached_image, "wb") as fh:
+            fh.write(b"cached-image")
+
+        def delayed_metadata(url):
+            time.sleep(0.15)
+            return {
+                "title": "Threads 上的範例作者（@example_author）",
+                "description": "降級狀態也必須先完成的貼文預覽",
+                "image": "https://scontent.cdninstagram.com/degraded-crawler.jpg",
+            }
+
+        shortener_app.fetch_open_graph_metadata = delayed_metadata
+        shortener_app.cache_preview_image = lambda code, image_url, timeout=8: (cached_image, "image/jpeg")
+        try:
+            started = time.monotonic()
+            status, headers, body = app.handle(
+                "GET",
+                "/degraded-crawler",
+                {},
+                b"",
+                "8.8.8.8",
+                "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.cache_preview_image = original_cache
+
+        html = body.decode()
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(elapsed, 0.12)
+        self.assertIn('property="og:title" content="降級狀態也必須先完成的貼文預覽"', html)
+        self.assertNotIn('property="og:title" content="Threads 貼文"', html)
+        final_row = self.store.lookup("degraded-crawler")
+        self.assertIsNotNone(final_row)
+        assert final_row is not None
+        self.assertEqual(final_row["preview_status"], "ready")
 
     def test_public_json_api_shortens_any_url_without_cleaning(self):
         app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")

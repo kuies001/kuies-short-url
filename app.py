@@ -79,6 +79,10 @@ PREVIEW_READY_REFRESH_SECONDS = 7 * 24 * 60 * 60
 PREVIEW_RETRY_BASE_SECONDS = 60 * 60
 PREVIEW_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 PREVIEW_VERSION_LENGTH = 12
+# Metadata fetch (5 s) and image fetch (8 s) are sequential; leave enough
+# headroom for the first crawler request to receive a complete card instead of
+# caching a retryable fallback page.
+PREVIEW_CRAWLER_WAIT_SECONDS = 15.0
 FALLBACK_PREVIEW_IMAGE_DIR = LOCAL_PREVIEW_IMAGE_DIR
 MAX_PREVIEW_IMAGE_BYTES = 5 * 1024 * 1024
 ABUSE_ALERT_WINDOW_SECONDS = 10 * 60
@@ -1135,7 +1139,9 @@ class ShortURLApp:
     public_daily_ip_limit: int = PUBLIC_DAILY_IP_LIMIT
     public_rate_log: Dict[str, list] = field(default_factory=dict)
     preview_warm_enabled: bool = False
+    preview_crawler_wait_seconds: float = PREVIEW_CRAWLER_WAIT_SECONDS
     preview_jobs: set[str] = field(default_factory=set, init=False, repr=False)
+    preview_job_events: Dict[str, threading.Event] = field(default_factory=dict, init=False, repr=False)
     preview_jobs_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def _rate_key(self, remote_addr: str, user_agent: str = "") -> str:
@@ -1245,16 +1251,19 @@ class ShortURLApp:
             error=("preview quality: " + ",".join(final_issues)) if status == "fallback" else "",
         )
 
-    def _warm_preview_async(self, row: dict) -> None:
+    def _warm_preview_async(self, row: dict) -> Optional[threading.Event]:
         if not self.preview_warm_enabled or not is_social_preview_target(row.get("target_url") or ""):
-            return
+            return None
         code = (row.get("code") or "").strip()
         if not code:
-            return
+            return None
         with self.preview_jobs_lock:
-            if code in self.preview_jobs:
-                return
+            existing_event = self.preview_job_events.get(code)
+            if existing_event is not None:
+                return existing_event
+            event = threading.Event()
             self.preview_jobs.add(code)
+            self.preview_job_events[code] = event
 
         def worker() -> None:
             try:
@@ -1262,10 +1271,51 @@ class ShortURLApp:
             except Exception as exc:
                 print(f"preview-warm code={code} status=error error={type(exc).__name__}:{exc}", flush=True)
             finally:
+                event.set()
                 with self.preview_jobs_lock:
                     self.preview_jobs.discard(code)
+                    if self.preview_job_events.get(code) is event:
+                        self.preview_job_events.pop(code, None)
 
         threading.Thread(target=worker, name=f"preview-warm-{code}", daemon=True).start()
+        return event
+
+    def _prepare_preview_for_crawler(self, row: dict) -> Optional[dict]:
+        """等待社群預覽達到品質門檻，避免爬蟲快取降級卡片。"""
+        target_url = row.get("target_url") or ""
+        if not self.preview_warm_enabled or not is_social_preview_target(target_url):
+            return row
+
+        def quality_issues(candidate: dict) -> list[str]:
+            status = candidate.get("preview_status") or "pending"
+            if status == "pending":
+                return ["pending"]
+            cached_path, _ = _preview_image_cache_path(candidate.get("code") or "")
+            metadata = {
+                "title": candidate.get("preview_title") or "",
+                "description": candidate.get("preview_description") or "",
+                "image": "",
+            }
+            return social_preview_quality_issues(
+                candidate.get("target_url") or target_url,
+                metadata,
+                image_path=cached_path or "",
+                require_image=True,
+            )
+
+        if not quality_issues(row):
+            return row
+
+        event = self._warm_preview_async(row)
+        if event is not None:
+            event.wait(max(0.0, float(self.preview_crawler_wait_seconds)))
+        refreshed = self.store.lookup(row.get("code") or "") or row
+        # Do not expose a generic title, login-wall metadata, or a missing image
+        # to the first crawler. A no-store 503 lets the platform retry instead of
+        # permanently caching the degraded card.
+        if quality_issues(refreshed):
+            return None
+        return refreshed
 
     def _prepare_preview_for_share(self, row: dict, wait_for_preview: bool) -> dict:
         """Warm a new social URL before returning it, preventing first-share fallback metadata from being cached."""
@@ -1500,7 +1550,15 @@ class ShortURLApp:
                     if row.get("disabled_at"):
                         return self._json(410, {"error": "short_url_disabled", "code": code})
                     if method == "GET" and is_preview_crawler(user_agent) and is_safe_preview_target(row["target_url"], base_url=self.base_url):
-                        return self._html_preview(code, row)
+                        preview_row = self._prepare_preview_for_crawler(row)
+                        if preview_row is None:
+                            return 503, {
+                                "Content-Type": "text/plain; charset=utf-8",
+                                "Cache-Control": "no-store",
+                                "Retry-After": "2",
+                                "X-Robots-Tag": "noindex",
+                            }, "預覽仍在準備中，請稍後重試。".encode("utf-8")
+                        return self._html_preview(code, preview_row)
                     if method == "GET" and not is_preview_crawler(user_agent) and needs_warning_page(row["target_url"]):
                         return self._html_warning(code, row)
                     if method == "GET" and not is_preview_crawler(user_agent):

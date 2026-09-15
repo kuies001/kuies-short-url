@@ -74,7 +74,7 @@ NAS 反向代理建議覆寫或正確傳遞 `X-Forwarded-For`，不要讓外部�
 ## 社群預覽架構
 
 - 支援 Meta／Messenger、Telegram、Discord、Slack、X/Twitter、LinkedIn 與 WhatsApp 預覽爬蟲；爬蟲取得第一方 OG 頁，真人仍直接 302 到原網址。
-- Threads／Instagram 新短網址在 API 回傳前會先同步完成首次預覽暖機，把標題、摘要與圖片存進 SQLite／本機快取；避免擴充剛複製短網址、使用者立刻分享時，通訊軟體搶先把「Threads 分享連結」永久快取。首次暖機後的定期更新仍採背景執行，社群爬蟲來訪時只讀快取，不同步等待 Threads。
+- Threads／Instagram 的一般 API 與網頁表單會在回傳前同步完成首次預覽暖機；擴充的快速模式則立即回傳短碼並在背景暖機。若社群爬蟲於 `pending` 期間到達，最多等待同一個背景工作 15 秒；仍未完成就回 `503 Retry-After: 2`，不輸出可被長期快取的 fallback OG 頁。暖機完成後爬蟲只讀 SQLite／第一方圖片，不在爬蟲請求內直接抓 Threads。
 - 若首次來源抓取失敗，fallback 標題使用可辨識來源帳號的 `Threads 貼文｜@帳號`／`Instagram 貼文｜@帳號`，不再輸出模糊的「分享連結」。公開 API 回應包含 `preview_status`、`preview_title`、`preview_description` 與 `preview_updated_at`，方便擴充或診斷工具確認預覽是否就緒。
 - 預覽資料成功時每 7 天背景更新；來源為登入牆、刪除或暫時失敗時，每小時背景重試。
 - 每個短碼都有獨立 fallback 圖片網址 `/preview-image/<code>.png`，避免社群平台把共用圖片的一次失敗快取到所有短網址。
@@ -114,7 +114,7 @@ https://u.kuies.tw/downloads/threads-link-cleaner.zip
   - Instagram：支援 `instagram.com` / `www.instagram.com`；移除 `igsh`、`utm_source`、`utm_medium`、`utm_campaign`、`utm_content`、`utm_term`、`utm_id`。
 - 自動模式使用頁面注入攔截器，攔截 `Navigator.prototype.clipboard.writeText/write`、`document.execCommand('copy')` 與一般 copy event，以涵蓋 Threads、Facebook 與 Instagram 的不同複製方式；頁面攔截器預設關閉，必須收到擴充同步狀態後才會啟用，避免關閉自動模式後仍自動縮短。
 - `writeText/write` 會先透過 page world ↔ content script request/response 橋接取得短網址，再執行唯一一次最終剪貼簿寫入，避免首次複製時「清理後原始網址」與「短網址」兩次非同步寫入互相覆蓋。
-- 自動複製會傳送 `fast_response: true`：伺服器先立即回傳短碼，再於背景完成 Threads／Instagram 預覽暖機，避免等待 2～13 秒的社群 metadata 抓取才出現「已複製」。快速模式每個 IP／User-Agent 每分鐘可用 30 次，一般公開表單仍維持每分鐘 5 次；每日 100 次與既有防濫用規則不變。
+- 自動複製會傳送 `fast_response: true`：伺服器先立即回傳短碼，再於背景完成 Threads／Instagram 預覽暖機，避免等待 2～13 秒的社群 metadata 抓取才出現「已複製」。若 Messenger／Meta 在暖機完成前抓取，伺服器會等待同一背景工作，逾時則回可重試的 503 而非 fallback 卡片。快速模式每個 IP／User-Agent 每分鐘可用 30 次，一般公開表單仍維持每分鐘 5 次；每日 100 次與既有防濫用規則不變。
 - 若縮網址 API 暫時失敗或 2.5 秒內沒有回應，剪貼簿會降級保留已去除追蹤參數的原始連結。
 
 ## 命令列建立短網址
