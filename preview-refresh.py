@@ -8,6 +8,7 @@ real worker failures or unhealthy backlog warnings without an LLM agent.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -21,6 +22,7 @@ from app import (
     create_app,
     social_preview_quality_issues,
 )
+from crawler_view import HEALTH_UA, classify_view, fetch_view, probe_image_url
 
 DEFAULT_DB = os.environ.get("SHORT_DB", "./data/shorturls.sqlite3")
 DEFAULT_LIMIT = 20
@@ -30,6 +32,18 @@ HEALTH_OVERDUE_THRESHOLD = 50
 HEALTH_MISSING_IMAGE_THRESHOLD = 20
 HEALTH_LONG_PENDING_SECONDS = 60 * 60
 PUBLIC_BASE_URL = os.environ.get("SHORT_BASE_URL", "https://u.kuies.tw").rstrip("/")
+
+# Crawler-view sampling: a small daily check of what social crawlers actually
+# receive from our own short URLs. Verdicts are compared against the stored
+# state so the job only speaks up when a card's state changes.
+CRAWLER_STATE_NAME = "crawler-health-state.json"
+CRAWLER_LOG_NAME = "crawler-health.jsonl"
+CRAWLER_SAMPLE_RECENT = 6
+CRAWLER_SAMPLE_ROTATE = 8
+CRAWLER_SAMPLE_WATCH = 3
+CRAWLER_REPORT_LIMIT = 10
+CRAWLER_RECENT_SECONDS = 24 * 60 * 60
+CRAWLER_OFFLINE_AGGREGATE = 3
 
 
 def run_worker(db_path: str, limit: int = DEFAULT_LIMIT, dry_run: bool = False, delay: float = DEFAULT_DELAY) -> dict:
@@ -156,7 +170,165 @@ def health_statistics(db_path: str, now: int | None = None, image_probe=None) ->
     return stats
 
 
-def run_health_check(db_path: str) -> dict:
+def _load_crawler_state(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {"cursor": 0, "verdicts": {}}
+
+
+def _save_crawler_state(path: str, state: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _append_crawler_log(path: str, entries: list[dict]) -> None:
+    if not entries:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            for entry in entries:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def crawler_view_check(
+    db_path: str,
+    base_url: str = PUBLIC_BASE_URL,
+    now: int | None = None,
+    fetcher=None,
+    image_probe=None,
+    state_path: str | None = None,
+    log_path: str | None = None,
+) -> dict:
+    """Sample short codes the way a social crawler sees them; report only changes.
+
+    Fetches our own public short URLs (never the Threads source page) with the
+    health-marked Meta user agent, so the service can tell these requests apart
+    from real Messenger crawls. A small rotating sample keeps the daily check
+    cheap; verdicts are stored and only changes (or first sightings of a
+    broken ready card) are reported, so silent degradation becomes visible
+    without flooding the alert channel.
+    """
+    now = int(time.time()) if now is None else int(now)
+    data_dir = os.path.dirname(os.path.abspath(db_path))
+    state_path = state_path or os.path.join(data_dir, CRAWLER_STATE_NAME)
+    log_path = log_path or os.path.join(data_dir, CRAWLER_LOG_NAME)
+    fetcher = fetcher or (lambda code: fetch_view(base_url, code, user_agent=HEALTH_UA))
+    image_probe = image_probe if image_probe is not None else probe_image_url
+
+    state = _load_crawler_state(state_path)
+    verdicts = dict(state.get("verdicts") or {})
+    store = ShortURLStore(db_path)
+    with store.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT code, target_url, preview_status, created_at FROM urls
+             WHERE disabled_at IS NULL
+               AND (lower(target_url) LIKE 'https://threads.com/%'
+                    OR lower(target_url) LIKE 'https://www.threads.com/%'
+                    OR lower(target_url) LIKE 'https://threads.net/%'
+                    OR lower(target_url) LIKE 'https://www.threads.net/%'
+                    OR lower(target_url) LIKE 'https://instagram.com/%'
+                    OR lower(target_url) LIKE 'https://www.instagram.com/%')
+             ORDER BY created_at DESC
+            """
+        ).fetchall()
+    eligible = [dict(row) for row in rows if (row["preview_status"] or "") in {"ready", "profile_fallback"}]
+
+    recent = [row for row in eligible if int(row["created_at"] or 0) >= now - CRAWLER_RECENT_SECONDS]
+    recent = recent[:CRAWLER_SAMPLE_RECENT]
+    picked = {row["code"] for row in recent}
+    others = [row for row in eligible if row["code"] not in picked]
+    cursor = int(state.get("cursor") or 0)
+    rotate: list[dict] = []
+    if others:
+        total = len(others)
+        take = min(CRAWLER_SAMPLE_ROTATE, total)
+        rotate = [others[(cursor + index) % total] for index in range(take)]
+        cursor = (cursor + take) % total
+        picked.update(row["code"] for row in rotate)
+    watch = [
+        row
+        for row in eligible
+        if verdicts.get(row["code"]) in {"degraded", "error", "retryable"} and row["code"] not in picked
+    ][:CRAWLER_SAMPLE_WATCH]
+    sample = recent + rotate + watch
+
+    reported: list[dict] = []
+    entries: list[dict] = []
+    offline_errors = 0
+    for row in sample:
+        code = row["code"]
+        try:
+            view = fetcher(code) or {}
+        except Exception:  # noqa: BLE001 - one bad fetch must not abort the sample
+            view = {"status": 0, "title": "", "description": "", "image": ""}
+        if int(view.get("status") or 0) == 0:
+            offline_errors += 1
+        verdict = classify_view(view, image_probe=image_probe)
+        previous = verdicts.get(code)
+        db_status = row["preview_status"] or ""
+        acceptable = {"ok"} if db_status == "ready" else {"profile", "ok"}
+        changed = previous is not None and verdict != previous
+        first_bad = previous is None and verdict not in acceptable
+        entries.append(
+            {"ts": now, "code": code, "db_status": db_status, "verdict": verdict, "previous": previous}
+        )
+        verdicts[code] = verdict
+        if changed or first_bad:
+            reported.append({"code": code, "db_status": db_status, "previous": previous, "verdict": verdict})
+
+    if offline_errors >= CRAWLER_OFFLINE_AGGREGATE:
+        # A public-entry outage would otherwise flood the report with per-code
+        # errors; collapse them into one aggregate line instead.
+        reported = [item for item in reported if item["verdict"] != "error"]
+
+    state["cursor"] = cursor
+    state["verdicts"] = verdicts
+    _save_crawler_state(state_path, state)
+    _append_crawler_log(log_path, entries)
+    return {
+        "sampled": len(sample),
+        "reported": reported,
+        "offline_errors": offline_errors,
+        "state_path": state_path,
+        "log_path": log_path,
+    }
+
+
+def _print_crawler_report(result: dict, verbose: bool = False) -> None:
+    offline = int(result.get("offline_errors") or 0)
+    reported = list(result.get("reported") or [])
+    lines: list[str] = []
+    if offline >= CRAWLER_OFFLINE_AGGREGATE:
+        lines.append(f"爬蟲視角檢查：{offline} 筆無法連線（公開入口可能異常）")
+    if reported:
+        lines.append(f"爬蟲視角警示：{len(reported)} 筆狀態變化")
+        for item in reported[:CRAWLER_REPORT_LIMIT]:
+            previous = item.get("previous") or "首次檢查"
+            lines.append(f"  {item.get('code')}（DB {item.get('db_status')}）：{previous} → {item.get('verdict')}")
+        if len(reported) > CRAWLER_REPORT_LIMIT:
+            lines.append(f"  …及其他 {len(reported) - CRAWLER_REPORT_LIMIT} 筆")
+    if verbose and not lines:
+        lines.append(f"爬蟲視角抽查：{int(result.get('sampled') or 0)} 筆，無異常")
+    if lines:
+        print("\n".join(lines))
+
+
+def run_health_check(db_path: str, crawler_fetcher=None) -> dict:
     stats = health_statistics(db_path)
     if stats["repair_codes"]:
         store = ShortURLStore(db_path)
@@ -188,6 +360,11 @@ def run_health_check(db_path: str) -> dict:
         alerts.append(f"long_pending={stats['long_pending']}")
     if alerts:
         print("預覽健康警示：" + " ".join(alerts))
+    try:
+        crawler_result = crawler_view_check(db_path, fetcher=crawler_fetcher)
+        _print_crawler_report(crawler_result)
+    except Exception as exc:  # noqa: BLE001 - a broken probe must not kill the health job
+        print(f"爬蟲視角檢查異常：{type(exc).__name__}: {str(exc)[:160]}")
     return stats
 
 
@@ -197,11 +374,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--health-check", action="store_true")
+    parser.add_argument("--crawler-check", action="store_true", help="抽查爬蟲視角並輸出變化（唯讀）")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY)
     args = parser.parse_args(argv)
     try:
         if args.health_check:
             run_health_check(args.db)
+        elif args.crawler_check:
+            _print_crawler_report(crawler_view_check(args.db), verbose=True)
         else:
             run_worker(
                 args.db,

@@ -30,6 +30,11 @@ from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlpars
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
+try:  # Local helper module; logged-in browser previews stay optional infrastructure.
+    import browser_preview
+except Exception:  # pragma: no cover - degraded environments keep working
+    browser_preview = None
+
 SAFE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RESERVED_CODES = {
     "api",
@@ -936,6 +941,7 @@ class ShortURLStore:
             "preview_next_retry_at": "ALTER TABLE urls ADD COLUMN preview_next_retry_at INTEGER",
             "preview_last_error": "ALTER TABLE urls ADD COLUMN preview_last_error TEXT",
             "preview_version": "ALTER TABLE urls ADD COLUMN preview_version TEXT",
+            "preview_source": "ALTER TABLE urls ADD COLUMN preview_source TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing:
@@ -1083,6 +1089,7 @@ class ShortURLStore:
         status: str,
         image_path: str = "",
         error: str = "",
+        source: str = "",
     ) -> bool:
         now = int(time.time())
         with self.connect() as conn:
@@ -1100,12 +1107,14 @@ class ShortURLStore:
             next_retry_at = None if is_ready else now + retry_delay
             last_error = None if is_ready else ((error or status or "preview unavailable")[:500])
             version = preview_content_version(metadata, image_path=image_path)
+            preview_source = (source or "")[:64] or None
             cur = conn.execute(
                 """
                 UPDATE urls
                    SET preview_title = ?, preview_description = ?, preview_status = ?,
                        preview_updated_at = ?, updated_at = ?, preview_failure_count = ?,
-                       preview_next_retry_at = ?, preview_last_error = ?, preview_version = ?
+                       preview_next_retry_at = ?, preview_last_error = ?, preview_version = ?,
+                       preview_source = COALESCE(?, preview_source)
                  WHERE code = ?
                 """,
                 (
@@ -1118,6 +1127,7 @@ class ShortURLStore:
                     next_retry_at,
                     last_error,
                     version,
+                    preview_source,
                     code,
                 ),
             )
@@ -1238,6 +1248,8 @@ class ShortURLApp:
     public_daily_ip_limit: int = PUBLIC_DAILY_IP_LIMIT
     public_rate_log: Dict[str, list] = field(default_factory=dict)
     preview_warm_enabled: bool = False
+    preview_browser_enabled: bool = False
+    crawler_log_path: str = ""
     preview_crawler_wait_seconds: float = PREVIEW_CRAWLER_WAIT_SECONDS
     preview_jobs: set[str] = field(default_factory=set, init=False, repr=False)
     preview_job_events: Dict[str, threading.Event] = field(default_factory=dict, init=False, repr=False)
@@ -1246,6 +1258,31 @@ class ShortURLApp:
     def _rate_key(self, remote_addr: str, user_agent: str = "") -> str:
         ua_hash = hashlib.sha256((user_agent or "").encode("utf-8")).hexdigest()[:12]
         return f"{remote_addr or 'unknown'}:{ua_hash}"
+
+    def _log_crawler_view(self, code: str, status: int, user_agent: str = "") -> None:
+        """Append one crawler-view line so retry behaviour can be measured later."""
+        path = (self.crawler_log_path or "").strip()
+        if not path:
+            return
+        try:
+            ua_value = user_agent or ""
+            if "kuies-preview-health" in ua_value:
+                ua_class = "health"
+            elif re.search(r"facebookexternalhit|facebot|messengerbot|meta-external", ua_value, re.I):
+                ua_class = "meta"
+            else:
+                ua_class = "other"
+            line = json.dumps(
+                {"ts": int(time.time()), "code": code, "status": int(status), "ua": ua_class},
+                ensure_ascii=False,
+            )
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > 5 * 1024 * 1024:
+                os.replace(path, path + ".1")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:  # noqa: BLE001 - telemetry must never break serving
+            pass
 
     def _check_public_rate_limit(
         self,
@@ -1291,7 +1328,13 @@ class ShortURLApp:
         expected = hmac.new(self.admin_token.encode("utf-8"), issued_at.encode("utf-8"), hashlib.sha256).hexdigest()
         return hmac.compare_digest(digest, expected)
 
-    def _warm_preview(self, row: dict, force_image_refresh: bool = False) -> None:
+    def _warm_preview(
+        self,
+        row: dict,
+        force_image_refresh: bool = False,
+        allow_browser: bool = True,
+        browser_budget: Optional[list] = None,
+    ) -> None:
         code = (row.get("code") or "").strip()
         target_url = (row.get("target_url") or "").strip()
         if not code or not is_social_preview_target(target_url):
@@ -1333,6 +1376,24 @@ class ShortURLApp:
                     status = "fallback"
                 else:
                     status = "profile_fallback"
+        should_try_browser = (
+            allow_browser
+            and self.preview_browser_enabled
+            and browser_preview is not None
+            and source_issues
+            and not (preserve_existing and existing_status == "ready")
+            and browser_preview.is_browser_preview_target(target_url)
+        )
+        browser_source = ""
+        if should_try_browser and (browser_budget is None or browser_budget[0] > 0):
+            if browser_budget is not None:
+                browser_budget[0] -= 1
+            upgraded, browser_source = self._browser_upgrade_metadata(code, target_url)
+            if upgraded:
+                metadata = upgraded
+                status = "ready"
+                preserve_existing = False
+                force_image_refresh = True
         if preserve_existing:
             cached_path = existing_cached_path
         elif force_image_refresh:
@@ -1355,7 +1416,35 @@ class ShortURLApp:
             status,
             image_path=cached_path or "",
             error=("preview quality: " + ",".join(final_issues)) if status == "fallback" else "",
+            source=browser_source,
         )
+
+    def _browser_upgrade_metadata(self, code: str, target_url: str) -> tuple[dict, str]:
+        """One bounded attempt to upgrade a public Threads post card via the logged-in browser.
+
+        Only posts whose logged-out visibility verdict is "public" are fetched;
+        restricted posts keep their author card. Returns (metadata, source)
+        with source "browser" when an upgrade is available.
+        """
+        if browser_preview is None:
+            return {}, ""
+        try:
+            result = browser_preview.fetch_threads_preview(target_url)
+        except Exception as exc:  # noqa: BLE001 - browser issues must not break warm
+            print(f"browser-preview code={code} status=error error={type(exc).__name__}", flush=True)
+            return {}, ""
+        if not result.get("ok"):
+            print(
+                f"browser-preview code={code} status=failed gate={result.get('gate')} error={result.get('error')}",
+                flush=True,
+            )
+            return {}, ""
+        metadata = sanitize_preview_metadata(target_url, result.get("metadata") or {})
+        if not metadata or social_preview_quality_issues(target_url, metadata, require_image=False):
+            return {}, ""
+        source = "browser"
+        print(f"browser-preview code={code} status=ok source={source} gate={result.get('gate')}", flush=True)
+        return metadata, source
 
     def _warm_preview_async(self, row: dict) -> Optional[threading.Event]:
         if not self.preview_warm_enabled or not is_social_preview_target(row.get("target_url") or ""):
@@ -1430,7 +1519,9 @@ class ShortURLApp:
         has_preview_text = bool((row.get("preview_title") or "").strip() or (row.get("preview_description") or "").strip())
         if wait_for_preview and not has_preview_text:
             try:
-                self._warm_preview(row)
+                # The synchronous form path stays fast; the async warm path
+                # performs the slower logged-in browser upgrade when needed.
+                self._warm_preview(row, allow_browser=False)
             except Exception as exc:
                 code = row.get("code") or ""
                 print(f"preview-warm-sync code={code} status=error error={type(exc).__name__}:{exc}", flush=True)
@@ -1731,12 +1822,16 @@ class ShortURLApp:
                     if method == "GET" and is_preview_crawler(user_agent) and is_safe_preview_target(row["target_url"], base_url=self.base_url):
                         preview_row = self._prepare_preview_for_crawler(row)
                         if preview_row is None:
+                            if is_social_preview_target(row["target_url"]):
+                                self._log_crawler_view(code, 503, user_agent)
                             return 503, {
                                 "Content-Type": "text/plain; charset=utf-8",
                                 "Cache-Control": "no-store",
                                 "Retry-After": "2",
                                 "X-Robots-Tag": "noindex",
                             }, "預覽仍在準備中，請稍後重試。".encode("utf-8")
+                        if is_social_preview_target(row["target_url"]):
+                            self._log_crawler_view(code, 200, user_agent)
                         return self._html_preview(code, preview_row)
                     if method == "GET" and not is_preview_crawler(user_agent) and needs_warning_page(row["target_url"]):
                         return self._html_warning(code, row)
@@ -2399,6 +2494,8 @@ def create_app(
     public_create_enabled: bool = True,
     public_daily_ip_limit: int = PUBLIC_DAILY_IP_LIMIT,
     preview_warm_enabled: bool = False,
+    preview_browser_enabled: bool = False,
+    crawler_log_path: str = "",
 ) -> ShortURLApp:
     return ShortURLApp(
         store=store,
@@ -2412,6 +2509,8 @@ def create_app(
         public_create_enabled=public_create_enabled,
         public_daily_ip_limit=public_daily_ip_limit,
         preview_warm_enabled=preview_warm_enabled,
+        preview_browser_enabled=preview_browser_enabled,
+        crawler_log_path=crawler_log_path,
     )
 
 
@@ -2497,6 +2596,8 @@ def main() -> None:
         public_create_enabled=str(args.public_create_enabled).lower() not in {"0", "false"},
         public_daily_ip_limit=max(0, int(args.public_daily_ip_limit)),
         preview_warm_enabled=True,
+        preview_browser_enabled=str(os.environ.get("SHORT_PREVIEW_BROWSER", "0")).lower() not in {"0", "false"},
+        crawler_log_path=os.environ.get("SHORT_CRAWLER_LOG", "./data/crawler-views.jsonl"),
     )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"kuies-short-url listening on http://{args.host}:{args.port} base={args.base_url} db={args.db}", flush=True)
