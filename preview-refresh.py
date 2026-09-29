@@ -328,6 +328,76 @@ def _print_crawler_report(result: dict, verbose: bool = False) -> None:
         print("\n".join(lines))
 
 
+def analyze_crawler_retries(log_path: str) -> dict:
+    """Summarize whether social crawlers retried after a 503 (service-side log).
+
+    Reads ``crawler-views.jsonl`` (written by the service for social short
+    codes) and reports how many Meta-class crawler hits there were, which
+    codes received a 503, and which were visited again afterwards — the
+    evidence needed to decide whether Messenger retries a retryable card.
+    """
+    entries: list[dict] = []
+    try:
+        with open(log_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    entries.append(value)
+    except OSError:
+        entries = []
+    meta = [entry for entry in entries if str(entry.get("ua") or "") == "meta"]
+    by_code: dict[str, list[dict]] = {}
+    for entry in meta:
+        by_code.setdefault(str(entry.get("code") or ""), []).append(entry)
+    retryable = 0
+    retried: list[dict] = []
+    for code, hits in by_code.items():
+        statuses = [int(hit.get("status") or 0) for hit in hits]
+        first_503 = next((index for index, status in enumerate(statuses) if status == 503), None)
+        if first_503 is None:
+            continue
+        retryable += 1
+        later = statuses[first_503 + 1:]
+        if later:
+            first_ts = int(hits[first_503].get("ts") or 0)
+            next_ts = int(hits[first_503 + 1].get("ts") or 0)
+            retried.append(
+                {"code": code, "attempts": len(hits), "after": later, "gap_seconds": max(0, next_ts - first_ts)}
+            )
+    return {
+        "entries": len(entries),
+        "meta_hits": len(meta),
+        "codes": len(by_code),
+        "retryable_codes": retryable,
+        "retried_codes": len(retried),
+        "samples": retried[:10],
+    }
+
+
+def print_crawler_retries(result: dict) -> None:
+    if not int(result.get("entries") or 0):
+        print("爬蟲請求紀錄：尚無資料（crawler-views.jsonl 尚未寫入）。")
+        return
+    print(
+        f"爬蟲請求紀錄：{result['entries']} 筆；Meta 類 {result['meta_hits']} 筆、{result['codes']} 個短碼。"
+    )
+    if not int(result.get("retryable_codes") or 0):
+        print("尚無 Meta 爬蟲收到 503 的紀錄；重試行為仍待真實流量驗證。")
+        return
+    print(f"曾收到 503 的短碼：{result['retryable_codes']} 個；其後再次來訪：{result['retried_codes']} 個。")
+    for sample in result.get("samples") or []:
+        print(
+            f"  {sample['code']}：{sample['attempts']} 次來訪，"
+            f"{sample['gap_seconds']} 秒後再訪，後續 {sample['after']}"
+        )
+
+
 def run_health_check(db_path: str, crawler_fetcher=None) -> dict:
     stats = health_statistics(db_path)
     if stats["repair_codes"]:
@@ -375,6 +445,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--health-check", action="store_true")
     parser.add_argument("--crawler-check", action="store_true", help="抽查爬蟲視角並輸出變化（唯讀）")
+    parser.add_argument("--crawler-retries", action="store_true", help="分析 Meta 爬蟲 503 後重試行為（唯讀）")
+    parser.add_argument(
+        "--crawler-log",
+        default=os.environ.get("SHORT_CRAWLER_LOG", "./data/crawler-views.jsonl"),
+        help="服務端爬蟲請求紀錄路徑",
+    )
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY)
     args = parser.parse_args(argv)
     try:
@@ -382,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
             run_health_check(args.db)
         elif args.crawler_check:
             _print_crawler_report(crawler_view_check(args.db), verbose=True)
+        elif args.crawler_retries:
+            print_crawler_retries(analyze_crawler_retries(args.crawler_log))
         else:
             run_worker(
                 args.db,

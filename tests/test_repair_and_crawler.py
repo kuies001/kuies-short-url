@@ -326,6 +326,74 @@ class CrawlerViewCheckTests(unittest.TestCase):
             lines = [json.loads(line) for line in fh if line.strip()]
         self.assertEqual(lines[0]["code"], "cw8")
 
+    def test_analyze_crawler_retries_detects_retry_after_503(self):
+        retry_log = os.path.join(self.tmp.name, "crawler-views.jsonl")
+        entries = [
+            {"ts": 1, "code": "r1", "status": 503, "ua": "meta"},
+            {"ts": 2, "code": "r1", "status": 200, "ua": "meta"},
+            {"ts": 3, "code": "r2", "status": 503, "ua": "meta"},
+            {"ts": 4, "code": "r3", "status": 200, "ua": "meta"},
+            {"ts": 5, "code": "r1", "status": 200, "ua": "health"},
+        ]
+        with open(retry_log, "w", encoding="utf-8") as fh:
+            for entry in entries:
+                fh.write(json.dumps(entry) + "\n")
+        result = self.worker.analyze_crawler_retries(retry_log)
+        self.assertEqual(result["entries"], 5)
+        self.assertEqual(result["meta_hits"], 4)
+        self.assertEqual(result["retryable_codes"], 2)
+        self.assertEqual(result["retried_codes"], 1)
+        self.assertEqual(result["samples"][0]["code"], "r1")
+        self.assertEqual(result["samples"][0]["after"], [200])
+        self.assertEqual(result["samples"][0]["gap_seconds"], 1)
+
+    def test_analyze_crawler_retries_empty_log(self):
+        result = self.worker.analyze_crawler_retries(os.path.join(self.tmp.name, "missing.jsonl"))
+        self.assertEqual(result["entries"], 0)
+        self.assertEqual(result["retryable_codes"], 0)
+
+
+class CrawlerLogTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "shorturls.sqlite3")
+        self.store = ShortURLStore(self.db_path)
+        self.log_path = os.path.join(self.tmp.name, "crawler-views.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_service_logs_crawler_views_for_social_targets_with_ua_class(self):
+        self.store.create_url("https://www.threads.com/@a/post/log1", code="log1")
+        self.store.create_url("https://example.com/plain", code="plain1")
+        app = create_app(
+            self.store,
+            "https://u.kuies.tw",
+            "secret",
+            preview_warm_enabled=True,
+            crawler_log_path=self.log_path,
+        )
+        app.preview_crawler_wait_seconds = 0.05
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_profile = shortener_app.fetch_social_profile_fallback_metadata
+        shortener_app.fetch_open_graph_metadata = lambda url: {}
+        shortener_app.fetch_social_profile_fallback_metadata = lambda url: {}
+        try:
+            meta_ua = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+            app.handle("GET", "/log1", {}, b"", "8.8.8.8", meta_ua)
+            app.handle("GET", "/log1", {}, b"", "8.8.8.8", meta_ua + " kuies-preview-health/1.0")
+            app.handle("GET", "/plain1", {}, b"", "8.8.8.8", meta_ua)
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.fetch_social_profile_fallback_metadata = original_profile
+        with open(self.log_path, "r", encoding="utf-8") as fh:
+            entries = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["code"], "log1")
+        self.assertEqual(entries[0]["ua"], "meta")
+        self.assertEqual(entries[0]["status"], 503)
+        self.assertEqual(entries[1]["ua"], "health")
+
 
 class BrowserPreviewGateTests(unittest.TestCase):
     def setUp(self):
