@@ -334,13 +334,15 @@ class CrawlerViewCheckTests(unittest.TestCase):
             {"ts": 3, "code": "r2", "status": 503, "ua": "meta"},
             {"ts": 4, "code": "r3", "status": 200, "ua": "meta"},
             {"ts": 5, "code": "r1", "status": 200, "ua": "health"},
+            {"ts": 6, "code": "r1", "status": 503, "ua": "meta", "ip": "lan"},
         ]
         with open(retry_log, "w", encoding="utf-8") as fh:
             for entry in entries:
                 fh.write(json.dumps(entry) + "\n")
         result = self.worker.analyze_crawler_retries(retry_log)
-        self.assertEqual(result["entries"], 5)
+        self.assertEqual(result["entries"], 6)
         self.assertEqual(result["meta_hits"], 4)
+        self.assertEqual(result["local_ignored"], 1)
         self.assertEqual(result["retryable_codes"], 2)
         self.assertEqual(result["retried_codes"], 1)
         self.assertEqual(result["samples"][0]["code"], "r1")
@@ -382,17 +384,21 @@ class CrawlerLogTests(unittest.TestCase):
             meta_ua = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
             app.handle("GET", "/log1", {}, b"", "8.8.8.8", meta_ua)
             app.handle("GET", "/log1", {}, b"", "8.8.8.8", meta_ua + " kuies-preview-health/1.0")
+            app.handle("GET", "/log1", {}, b"", "192.168.1.22", meta_ua)
             app.handle("GET", "/plain1", {}, b"", "8.8.8.8", meta_ua)
         finally:
             shortener_app.fetch_open_graph_metadata = original_fetch
             shortener_app.fetch_social_profile_fallback_metadata = original_profile
         with open(self.log_path, "r", encoding="utf-8") as fh:
             entries = [json.loads(line) for line in fh if line.strip()]
-        self.assertEqual(len(entries), 2)
+        self.assertEqual(len(entries), 3)
         self.assertEqual(entries[0]["code"], "log1")
         self.assertEqual(entries[0]["ua"], "meta")
         self.assertEqual(entries[0]["status"], 503)
+        self.assertEqual(entries[0]["ip"], "public")
         self.assertEqual(entries[1]["ua"], "health")
+        self.assertEqual(entries[2]["ua"], "meta")
+        self.assertEqual(entries[2]["ip"], "lan")
 
 
 class BrowserPreviewGateTests(unittest.TestCase):

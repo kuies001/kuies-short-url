@@ -1259,7 +1259,7 @@ class ShortURLApp:
         ua_hash = hashlib.sha256((user_agent or "").encode("utf-8")).hexdigest()[:12]
         return f"{remote_addr or 'unknown'}:{ua_hash}"
 
-    def _log_crawler_view(self, code: str, status: int, user_agent: str = "") -> None:
+    def _log_crawler_view(self, code: str, status: int, user_agent: str = "", remote_addr: str = "") -> None:
         """Append one crawler-view line so retry behaviour can be measured later."""
         path = (self.crawler_log_path or "").strip()
         if not path:
@@ -1272,8 +1272,11 @@ class ShortURLApp:
                 ua_class = "meta"
             else:
                 ua_class = "other"
+            ip_class = "unknown"
+            if remote_addr:
+                ip_class = "lan" if is_private_client(remote_addr) else "public"
             line = json.dumps(
-                {"ts": int(time.time()), "code": code, "status": int(status), "ua": ua_class},
+                {"ts": int(time.time()), "code": code, "status": int(status), "ua": ua_class, "ip": ip_class},
                 ensure_ascii=False,
             )
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -1823,7 +1826,7 @@ class ShortURLApp:
                         preview_row = self._prepare_preview_for_crawler(row)
                         if preview_row is None:
                             if is_social_preview_target(row["target_url"]):
-                                self._log_crawler_view(code, 503, user_agent)
+                                self._log_crawler_view(code, 503, user_agent, remote_addr)
                             return 503, {
                                 "Content-Type": "text/plain; charset=utf-8",
                                 "Cache-Control": "no-store",
@@ -1831,7 +1834,7 @@ class ShortURLApp:
                                 "X-Robots-Tag": "noindex",
                             }, "預覽仍在準備中，請稍後重試。".encode("utf-8")
                         if is_social_preview_target(row["target_url"]):
-                            self._log_crawler_view(code, 200, user_agent)
+                            self._log_crawler_view(code, 200, user_agent, remote_addr)
                         return self._html_preview(code, preview_row)
                     if method == "GET" and not is_preview_crawler(user_agent) and needs_warning_page(row["target_url"]):
                         return self._html_warning(code, row)

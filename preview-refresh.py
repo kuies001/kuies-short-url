@@ -352,6 +352,10 @@ def analyze_crawler_retries(log_path: str) -> dict:
     except OSError:
         entries = []
     meta = [entry for entry in entries if str(entry.get("ua") or "") == "meta"]
+    # Local test traffic must not masquerade as Messenger retries: only public
+    # IPs count as real crawler evidence.
+    local_ignored = [entry for entry in meta if str(entry.get("ip") or "") == "lan"]
+    meta = [entry for entry in meta if str(entry.get("ip") or "") != "lan"]
     by_code: dict[str, list[dict]] = {}
     for entry in meta:
         by_code.setdefault(str(entry.get("code") or ""), []).append(entry)
@@ -376,6 +380,7 @@ def analyze_crawler_retries(log_path: str) -> dict:
         "codes": len(by_code),
         "retryable_codes": retryable,
         "retried_codes": len(retried),
+        "local_ignored": len(local_ignored),
         "samples": retried[:10],
     }
 
@@ -384,8 +389,10 @@ def print_crawler_retries(result: dict) -> None:
     if not int(result.get("entries") or 0):
         print("爬蟲請求紀錄：尚無資料（crawler-views.jsonl 尚未寫入）。")
         return
+    local_ignored = int(result.get("local_ignored") or 0)
+    local_note = f"（已排除本機測試 {local_ignored} 筆）" if local_ignored else ""
     print(
-        f"爬蟲請求紀錄：{result['entries']} 筆；Meta 類 {result['meta_hits']} 筆、{result['codes']} 個短碼。"
+        f"爬蟲請求紀錄：{result['entries']} 筆；Meta 類 {result['meta_hits']} 筆、{result['codes']} 個短碼。{local_note}"
     )
     if not int(result.get("retryable_codes") or 0):
         print("尚無 Meta 爬蟲收到 503 的紀錄；重試行為仍待真實流量驗證。")
