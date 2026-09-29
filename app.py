@@ -79,6 +79,12 @@ PREVIEW_READY_REFRESH_SECONDS = 7 * 24 * 60 * 60
 PREVIEW_RETRY_BASE_SECONDS = 60 * 60
 PREVIEW_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 PREVIEW_VERSION_LENGTH = 12
+# Bump this when the generated OG contract changes so social platforms refetch
+# existing immutable preview URLs instead of keeping an older broken card.
+PREVIEW_IMAGE_URL_SCHEMA_VERSION = 2
+# The browser extension may hand us a currently visible social image. Keep the
+# allowlist narrow because this value is supplied by a public endpoint.
+CLIENT_PREVIEW_IMAGE_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
 # Metadata fetch (5 s) and image fetch (8 s) are sequential; leave enough
 # headroom for the first crawler request to receive a complete card instead of
 # caching a retryable fallback page.
@@ -583,6 +589,44 @@ def sanitize_preview_metadata(target_url: str, metadata: dict) -> dict:
     return sanitized
 
 
+def is_safe_client_preview_image_url(image_url: str) -> bool:
+    """Allow only signed public Meta CDN images supplied by the extension."""
+    try:
+        parsed = urlparse((image_url or "").strip())
+        host = (parsed.hostname or "").lower()
+    except (TypeError, ValueError):
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.port
+        or not parsed.path.startswith("/v/")
+        or len(image_url or "") > 4096
+    ):
+        return False
+    return any(host == suffix[1:] or host.endswith(suffix) for suffix in CLIENT_PREVIEW_IMAGE_HOST_SUFFIXES)
+
+
+def client_preview_metadata(target_url: str, preview: object) -> dict:
+    """Validate page-provided social metadata without persisting its image URL."""
+    if not is_social_preview_target(target_url) or not isinstance(preview, dict):
+        return {}
+    metadata = {
+        "title": str(preview.get("title") or "").strip()[:2000],
+        "description": str(preview.get("description") or "").strip()[:5000],
+        "image": str(preview.get("image") or "").strip()[:4096],
+    }
+    if not metadata["image"] or not (metadata["title"] or metadata["description"]):
+        return {}
+    if not is_safe_client_preview_image_url(metadata["image"]):
+        return {}
+    metadata = sanitize_preview_metadata(target_url, metadata)
+    if social_preview_quality_issues(target_url, metadata, require_image=False):
+        return {}
+    return metadata
+
+
 def fetch_social_profile_fallback_metadata(target_url: str) -> dict:
     """Use a Threads profile card when an individual post cannot be read publicly.
 
@@ -641,6 +685,61 @@ def _preview_image_extension(content_type: str, image_url: str = "") -> tuple[st
     if path.endswith(".webp"):
         return ".webp", "image/webp"
     return ".jpg", "image/jpeg"
+
+
+def _preview_image_dimensions(image_path: str) -> Tuple[Optional[int], Optional[int]]:
+    """Read dimensions from a cached PNG, JPEG or WebP without extra packages."""
+    if not image_path or not os.path.isfile(image_path):
+        return None, None
+    try:
+        with open(image_path, "rb") as fh:
+            data = fh.read(256 * 1024)
+    except OSError:
+        return None, None
+
+    def valid(width: int, height: int) -> Tuple[Optional[int], Optional[int]]:
+        if 1 <= width <= 100_000 and 1 <= height <= 100_000:
+            return width, height
+        return None, None
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return valid(int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
+
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        if data[12:16] == b"VP8X" and len(data) >= 30:
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+            return valid(width, height)
+
+    if data.startswith(b"\xff\xd8"):
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        index = 2
+        while index + 3 < len(data):
+            if data[index] != 0xFF:
+                index += 1
+                continue
+            while index < len(data) and data[index] == 0xFF:
+                index += 1
+            if index >= len(data):
+                break
+            marker = data[index]
+            index += 1
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 2 > len(data):
+                break
+            segment_length = int.from_bytes(data[index:index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(data):
+                break
+            if marker in sof_markers and segment_length >= 7:
+                height = int.from_bytes(data[index + 3:index + 5], "big")
+                width = int.from_bytes(data[index + 5:index + 7], "big")
+                return valid(width, height)
+            index += segment_length
+    return None, None
 
 
 def _preview_image_cache_path(code: str) -> tuple[str, str] | tuple[None, None]:
@@ -1216,17 +1315,24 @@ class ShortURLApp:
         preserve_existing = False
         source_issues = social_preview_quality_issues(target_url, metadata, require_image=False)
         if source_issues:
-            metadata = sanitize_preview_metadata(target_url, fetch_social_profile_fallback_metadata(target_url))
-            profile_issues = social_preview_quality_issues(target_url, metadata, require_image=False)
-            if profile_issues and existing_is_healthy:
+            if existing_is_healthy and existing_status == "ready":
+                # A verified post card is more specific than a reachable profile.
+                # A temporary crawler login wall must not downgrade it on refresh.
                 metadata = existing_metadata
-                status = existing_status
+                status = "ready"
                 preserve_existing = True
-            elif profile_issues:
-                metadata = {}
-                status = "fallback"
             else:
-                status = "profile_fallback"
+                metadata = sanitize_preview_metadata(target_url, fetch_social_profile_fallback_metadata(target_url))
+                profile_issues = social_preview_quality_issues(target_url, metadata, require_image=False)
+                if profile_issues and existing_is_healthy:
+                    metadata = existing_metadata
+                    status = existing_status
+                    preserve_existing = True
+                elif profile_issues:
+                    metadata = {}
+                    status = "fallback"
+                else:
+                    status = "profile_fallback"
         if preserve_existing:
             cached_path = existing_cached_path
         elif force_image_refresh:
@@ -1332,6 +1438,78 @@ class ShortURLApp:
         self._warm_preview_async(row)
         return row
 
+    def _seed_client_preview(self, row: dict, preview: object) -> bool:
+        """Store browser-observed social metadata while discarding the source URL."""
+        target_url = row.get("target_url") or ""
+        metadata = client_preview_metadata(target_url, preview)
+        if not metadata:
+            return False
+        cached_path, _ = cache_preview_image(
+            row.get("code") or "",
+            metadata["image"],
+            force=True,
+        )
+        if not cached_path:
+            return False
+        issues = social_preview_quality_issues(
+            target_url,
+            metadata,
+            image_path=cached_path,
+            require_image=True,
+        )
+        if issues:
+            return False
+        self.store.update_preview_metadata(
+            row.get("code") or "",
+            metadata,
+            "ready",
+            image_path=cached_path,
+        )
+        return True
+
+    def _seed_client_preview_async(self, row: dict, preview: object) -> bool:
+        """Warm a browser-observed preview without delaying clipboard shortening."""
+        code = (row.get("code") or "").strip()
+        if not code or not client_preview_metadata(row.get("target_url") or "", preview):
+            return False
+        with self.preview_jobs_lock:
+            if code in self.preview_jobs:
+                return True
+            self.preview_jobs.add(code)
+
+        def worker() -> None:
+            try:
+                if not self._seed_client_preview(row, preview):
+                    refreshed = self.store.lookup(code)
+                    if refreshed:
+                        self._warm_preview(refreshed)
+            except Exception as exc:
+                print(f"client-preview-warm code={code} status=error error={type(exc).__name__}:{exc}", flush=True)
+            finally:
+                with self.preview_jobs_lock:
+                    self.preview_jobs.discard(code)
+
+        threading.Thread(target=worker, name=f"client-preview-warm-{code}", daemon=True).start()
+        return True
+
+    def _prepare_preview_with_client(
+        self,
+        row: dict,
+        preview: object,
+        wait_for_preview: bool,
+    ) -> dict:
+        if preview:
+            if wait_for_preview:
+                try:
+                    if self._seed_client_preview(row, preview):
+                        return self.store.lookup(row.get("code") or "") or row
+                except Exception as exc:
+                    code = row.get("code") or ""
+                    print(f"client-preview-sync code={code} status=error error={type(exc).__name__}:{exc}", flush=True)
+            elif self._seed_client_preview_async(row, preview):
+                return row
+        return self._prepare_preview_for_share(row, wait_for_preview)
+
     def _create_and_alert(
         self,
         target_url: str,
@@ -1341,6 +1519,7 @@ class ShortURLApp:
         creator_ip: str = "",
         enforce_target_policy: bool = True,
         wait_for_preview: bool = False,
+        client_preview: object = None,
     ) -> dict:
         if enforce_target_policy:
             validate_target_url(target_url, base_url=self.base_url)
@@ -1350,11 +1529,11 @@ class ShortURLApp:
         if existing and not code:
             if existing.get("disabled_at"):
                 raise ValueError("此目標網址曾被停用，不能自動建立新的短碼。")
-            return self._prepare_preview_for_share(existing, wait_for_preview)
+            return self._prepare_preview_with_client(existing, client_preview, wait_for_preview)
         row = self.store.create_url(target_url, code=code, title=title, source=source, creator_ip=creator_ip)
         self._check_volume_alerts(row)
         self._check_abuse_alerts(row)
-        return self._prepare_preview_for_share(row, wait_for_preview)
+        return self._prepare_preview_with_client(row, client_preview, wait_for_preview)
 
     def _check_volume_alerts(self, created_row: dict) -> None:
         total_count = self.store.count_urls()
@@ -1662,6 +1841,7 @@ class ShortURLApp:
                 source="extension",
                 creator_ip=remote_addr or "unknown",
                 wait_for_preview=not fast_response,
+                client_preview=payload.get("preview"),
             )
             return self._cors_json(201, self._public_row(row))
         except ValueError as exc:
@@ -1771,7 +1951,10 @@ class ShortURLApp:
             version_metadata,
             image_path=cached_path or "",
         )
-        return f"{self.base_url.rstrip('/')}/preview-image/{quote(code)}-{version}{ext}"
+        return (
+            f"{self.base_url.rstrip('/')}/preview-image/{quote(code)}-{version}{ext}"
+            f"?v={PREVIEW_IMAGE_URL_SCHEMA_VERSION}"
+        )
 
     def _preview_status_row(self, row: dict) -> dict:
         status = row.get("preview_status") or "pending"
@@ -1870,8 +2053,11 @@ class ShortURLApp:
                 cached_path, content_type = cache_preview_image(code, metadata.get("image", ""))
         if not cached_path or not os.path.exists(cached_path):
             return self._download_og_image()
-        with open(cached_path, "rb") as fh:
-            data = fh.read()
+        try:
+            with open(cached_path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self._download_og_image()
         return 200, {
             "Content-Type": content_type or "image/jpeg",
             "Cache-Control": "public, max-age=604800, immutable",
@@ -1919,6 +2105,13 @@ class ShortURLApp:
             # lets one failed fetch poison previews for unrelated links.
             image_url = self._preview_image_url(row, metadata=metadata)
             image_type = "image/png"
+        image_width, image_height = _preview_image_dimensions(cached_path or self.og_image_path)
+        image_dimension_tags = ""
+        if image_width and image_height:
+            image_dimension_tags = (
+                f'<meta property="og:image:width" content="{image_width}">\n'
+                f'<meta property="og:image:height" content="{image_height}">'
+            )
         safe_title = html.escape(title, quote=True)
         safe_description = html.escape(description, quote=True)
         safe_short = html.escape(short_url, quote=True)
@@ -1942,8 +2135,7 @@ class ShortURLApp:
 <meta property="og:image" content="{safe_image}">
 <meta property="og:image:secure_url" content="{safe_image}">
 <meta property="og:image:type" content="{html.escape(image_type, quote=True)}">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
+{image_dimension_tags}
 <meta property="article:author" content="{safe_site}">
 <meta property="article:published_time" content="{time.strftime('%Y-%m-%dT%H:%M:%S+08:00', time.localtime(row.get('created_at') or time.time()))}">
 <meta name="twitter:card" content="summary_large_image">

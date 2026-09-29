@@ -100,7 +100,8 @@ https://u.kuies.tw/downloads/threads-link-cleaner.zip
 
 功能：
 
-- 目前版本：`1.7.4`。
+- 目前版本：`1.7.5`。
+- v1.7.5：Threads 頁面可見貼文會把正文與貼文圖片送入短網址預覽快取，並修正 Messenger OG 圖片尺寸與版本快取。
 - 點開擴充後有一個自動模式開關與兩個手動按鈕：
   - `自動去除追蹤並縮短`：開啟後，在 Threads、Facebook 與 IG 點「複製連結」時，會攔截頁面剪貼簿寫入；Threads 新版 `/share/<token>` 與 Facebook `/share/p/<token>` 等包裝網址會先解析成真正貼文網址，再移除 `xmt`、`slof`、`fbclid`、`mibextid`、`rdid`、`share_url` 等追蹤參數、建立 `u.kuies.tw` 短網址並寫回剪貼簿。
   - v1.7.4 修正 Facebook 原生 `copy` event：即使 `/share/p/<token>/` 沒有 query、清理前後字串相同，仍會送交後端解析真正貼文網址並縮短，不再原樣留下分享包裝網址。

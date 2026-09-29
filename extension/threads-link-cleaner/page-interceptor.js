@@ -104,21 +104,104 @@
     return match ? match[0] : '';
   }
 
+  function collectPagePreview(rawUrl) {
+    if (!rawUrl || !document || typeof document.querySelectorAll !== 'function') return {};
+    let parsed;
+    try {
+      parsed = new URL(rawUrl, 'https://www.threads.com/');
+    } catch (error) {
+      return {};
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (!['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(host)) return {};
+    const postMatch = parsed.pathname.match(/^\/@([^/]+)\/post\/([^/?#]+)/i);
+    if (!postMatch) return {};
+    const handle = postMatch[1].toLowerCase();
+    const postId = postMatch[2];
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    const anchor = anchors.find((candidate) => {
+      try {
+        const href = new URL(candidate.href || candidate.getAttribute('href') || '', parsed.origin);
+        return href.pathname.toLowerCase().includes(`/post/${postId.toLowerCase()}`);
+      } catch (error) {
+        return false;
+      }
+    });
+    if (!anchor) return {};
+
+    let container = null;
+    if (typeof anchor.closest === 'function') {
+      container = anchor.closest('[data-pressable-container="true"]');
+    }
+    if (!container) {
+      let node = anchor.parentElement;
+      for (let depth = 0; node && depth < 10; depth += 1, node = node.parentElement) {
+        if (typeof node.querySelectorAll === 'function' && node.querySelectorAll('img').length) {
+          container = node;
+        }
+      }
+    }
+    if (!container) return {};
+
+    const lines = String(container.innerText || '')
+      .split(/\n+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const handleIndex = lines.findIndex((line) => line.replace(/^@/, '').toLowerCase() === handle);
+    const contentLines = (handleIndex >= 0 ? lines.slice(handleIndex + 1) : lines)
+      .filter((line) => !/^\d+$/.test(line) && line !== '/')
+      .filter((line) => !/^(?:剛剛|\d+\s*(?:秒|分|分鐘|小時|天|週|星期|月|年)前?)$/i.test(line))
+      .slice(0, 8);
+    const description = contentLines.join(' ').trim().slice(0, 5000);
+    if (!description) return {};
+
+    const images = typeof container.querySelectorAll === 'function'
+      ? Array.from(container.querySelectorAll('img'))
+          .map((image) => ({
+            url: image.currentSrc || image.src || '',
+            alt: image.alt || '',
+            width: Number(image.naturalWidth || image.width || 0),
+            height: Number(image.naturalHeight || image.height || 0),
+          }))
+          .filter((image) => {
+            try {
+              const imageUrl = new URL(image.url);
+              return imageUrl.protocol === 'https:'
+                && imageUrl.pathname.startsWith('/v/')
+                && !/大頭貼|avatar|profile/i.test(image.alt)
+                && image.width >= 200
+                && image.height >= 120;
+            } catch (error) {
+              return false;
+            }
+          })
+          .sort((left, right) => (right.width * right.height) - (left.width * left.height))
+      : [];
+    const image = images.length ? images[0].url : '';
+    return {
+      title: description.slice(0, 200),
+      description,
+      image,
+    };
+  }
+
   function notifyShorten(sourceText) {
     if (!autoCleanEnabled) return;
     const url = findFirstTrackingUrl(sourceText);
     if (!url) return;
     const cleanedUrl = cleanUrl(url);
+    const preview = collectPagePreview(cleanedUrl);
     window.dispatchEvent(new CustomEvent('kuies-tracking-copy', {
-      detail: { url, cleanedUrl, sourceText },
+      detail: { url, cleanedUrl, sourceText, preview },
     }));
-    postBridge('copy', { url, cleanedUrl, sourceText });
+    postBridge('copy', { url, cleanedUrl, sourceText, preview });
   }
 
-  function requestShortUrl(sourceText) {
+  function requestShortUrl(sourceText, preview = null) {
     const url = findFirstTrackingUrl(sourceText);
     if (!url) return Promise.resolve(sourceText);
     const cleanedUrl = cleanUrl(url);
+    const pagePreview = preview || collectPagePreview(cleanedUrl);
     const requestId = `copy-${Date.now()}-${++shortenRequestSequence}`;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -126,7 +209,7 @@
         reject(new Error('shorten_timeout'));
       }, SHORTEN_TIMEOUT_MS);
       pendingShortenRequests.set(requestId, { resolve, reject, timeout });
-      postBridge('shorten-request', { requestId, url, cleanedUrl, sourceText });
+      postBridge('shorten-request', { requestId, url, cleanedUrl, sourceText, preview: pagePreview });
     });
   }
 
@@ -134,7 +217,7 @@
     const cleaned = cleanText(sourceText);
     if (!autoCleanEnabled || !findFirstTrackingUrl(cleaned)) return cleaned;
     try {
-      return await requestShortUrl(cleaned);
+      return await requestShortUrl(cleaned, collectPagePreview(cleaned));
     } catch (error) {
       console.warn('[kuies.tw Cleaner] 首次縮短失敗，改寫入已清理網址:', error);
       return cleaned;
@@ -249,7 +332,13 @@
 
   // 旗標保留給 page world 除錯使用；content script 不能讀這個旗標，
   // 跨隔離世界同步優先靠 postMessage；CustomEvent 保留相容。
-  window.__kuiesTrackingCleaner = { cleanUrl, cleanText, findFirstTrackingUrl, getAutoCleanEnabled: () => autoCleanEnabled };
+  window.__kuiesTrackingCleaner = {
+    cleanUrl,
+    cleanText,
+    findFirstTrackingUrl,
+    collectPagePreview,
+    getAutoCleanEnabled: () => autoCleanEnabled,
+  };
   window.__kuiesTrackingCleanerInstalled = true;
   dispatchReady();
   console.info('[kuies.tw Cleaner] 已就緒：Threads/Facebook/IG 自動清理與縮短');

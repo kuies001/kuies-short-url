@@ -161,16 +161,24 @@ async function waitForPreview(shortUrl, initialStatus = 'pending', options = {})
   return shortUrl;
 }
 
-async function shortenUrl(url) {
+async function shortenUrl(url, preview = {}) {
+  const payload = {
+    url,
+    clean_tracking: true,
+    fast_response: true,
+    title: '已移除追蹤參數的分享連結',
+  };
+  if (preview && typeof preview === 'object' && preview.image) {
+    payload.preview = {
+      title: String(preview.title || ''),
+      description: String(preview.description || ''),
+      image: String(preview.image || ''),
+    };
+  }
   const response = await fetch(SHORTENER_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url,
-      clean_tracking: true,
-      fast_response: true,
-      title: '已移除追蹤參數的分享連結',
-    }),
+    body: JSON.stringify(payload),
   });
   const data = await response.json();
   if (!response.ok || !data.short_url) {
@@ -182,9 +190,9 @@ async function shortenUrl(url) {
   return data.short_url;
 }
 
-async function replaceClipboardWithShortUrl(cleanedUrl) {
+async function replaceClipboardWithShortUrl(cleanedUrl, preview = {}) {
   if (!autoCleanEnabled) return;
-  const shortUrl = await shortenUrl(cleanTrackingUrl(cleanedUrl));
+  const shortUrl = await shortenUrl(cleanTrackingUrl(cleanedUrl), preview);
   if (!autoCleanEnabled) return;
   await navigator.clipboard.writeText(shortUrl);
 }
@@ -198,7 +206,7 @@ function handleCopyDetail(detail) {
   if (copyKey === lastCopyKey && now - lastCopyAt < 1500) return;
   lastCopyKey = copyKey;
   lastCopyAt = now;
-  replaceClipboardWithShortUrl(cleanedUrl).catch(() => {
+  replaceClipboardWithShortUrl(cleanedUrl, detail.preview).catch(() => {
     // 若縮網址 API 暫時失敗，頁面攔截器已先把剪貼簿內容清掉追蹤參數。
   });
 }
@@ -212,7 +220,7 @@ async function handleShortenRequest(detail) {
     return;
   }
   try {
-    const shortUrl = await shortenUrl(cleanTrackingUrl(cleanedUrl));
+    const shortUrl = await shortenUrl(cleanTrackingUrl(cleanedUrl), detail.preview);
     postBridge('shorten-result', { requestId, shortUrl });
   } catch (error) {
     postBridge('shorten-error', {

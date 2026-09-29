@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import app as shortener_app
 from app import ShortURLStore, create_app
@@ -86,9 +87,29 @@ class PreviewResilienceTests(unittest.TestCase):
             fh.write(b"two")
         self.store.update_preview_metadata("version", {"title": "二"}, "ready", image_path=image_path)
         third = app._preview_image_url(self.store.lookup("version"))
-        self.assertRegex(first, r"/preview-image/version-[0-9a-f]{12}\.jpg$")
+        self.assertRegex(first, r"/preview-image/version-[0-9a-f]{12}\.jpg\?v=2$")
         self.assertNotEqual(first, second)
         self.assertNotEqual(second, third)
+
+    def test_preview_image_route_falls_back_when_cached_file_becomes_unreadable(self):
+        self.store.create_url("https://example.com/unreadable", code="perm1")
+        app = create_app(self.store, "https://u.kuies.tw", "secret", preview_warm_enabled=True)
+        original_lookup = shortener_app._preview_image_cache_path
+        original_fallback = app._download_og_image
+        unreadable_path = os.path.join(self.tmp.name, "preview-permission-denied.jpg")
+        with open(unreadable_path, "wb") as fh:
+            fh.write(b"cached")
+        shortener_app._preview_image_cache_path = lambda code: (unreadable_path, "image/jpeg")
+        app._download_og_image = lambda: (200, {"Content-Type": "image/png"}, b"fallback")
+        try:
+            with mock.patch("builtins.open", side_effect=PermissionError(1, "Operation not permitted")):
+                status, headers, body = app._download_preview_image("perm1")
+        finally:
+            shortener_app._preview_image_cache_path = original_lookup
+            app._download_og_image = original_fallback
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(body, b"fallback")
 
     def test_versioned_and_legacy_image_routes_work_and_reject_unsafe_names(self):
         self.store.create_url("https://www.threads.com/@a/post/3", code="safe-code")
@@ -269,6 +290,34 @@ class PreviewResilienceTests(unittest.TestCase):
         row = self.store.lookup("keepPT")
         self.assertEqual(row["preview_status"], "profile_fallback")
         self.assertEqual(row["preview_title"], existing["title"])
+
+    def test_refresh_keeps_verified_post_when_source_only_returns_profile(self):
+        target = "https://www.threads.com/@a/post/verified"
+        self.store.create_url(target, code="keepPost")
+        image_dir = shortener_app.preview_image_dir()
+        os.makedirs(image_dir, exist_ok=True)
+        image_path = os.path.join(image_dir, "keepPost.jpg")
+        with open(image_path, "wb") as fh:
+            fh.write(b"valid-post-image")
+        self.store.update_preview_metadata(
+            "keepPost", {"title": "Threads 上的 A", "description": "真實貼文文字", "image": ""},
+            "ready", image_path=image_path,
+        )
+        app = create_app(self.store, "https://u.kuies.tw", "secret", preview_warm_enabled=True)
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_profile = shortener_app.fetch_social_profile_fallback_metadata
+        try:
+            shortener_app.fetch_open_graph_metadata = lambda url: {"title": "Threads", "description": "", "image": ""}
+            shortener_app.fetch_social_profile_fallback_metadata = lambda url: {
+                "title": "Threads 貼文｜A", "description": "帳號個人頁", "image": "https://example.com/profile.jpg",
+            }
+            app._warm_preview(self.store.lookup("keepPost"))
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.fetch_social_profile_fallback_metadata = original_profile
+        row = self.store.lookup("keepPost")
+        self.assertEqual(row["preview_status"], "ready")
+        self.assertEqual(row["preview_description"], "真實貼文文字")
 
     def test_worker_priority_batch_dry_run_and_silent_success(self):
         worker = load_worker_module()

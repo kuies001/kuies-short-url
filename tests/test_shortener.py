@@ -461,7 +461,7 @@ class ShortURLTests(unittest.TestCase):
         self.assertIn('property="og:site_name" content="example.com"', html)
         self.assertIn('property="og:title" content="原站文章標題"', html)
         self.assertIn('property="og:description" content="原站文章摘要"', html)
-        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen1-[0-9a-f]{12}\.jpg"')
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen1-[0-9a-f]{12}\.jpg\?v=2"')
         self.assertEqual(self.store.lookup("gen1")["clicks"], 0)
 
     def test_preview_crawler_general_target_falls_back_to_stored_title_and_default_image(self):
@@ -481,7 +481,7 @@ class ShortURLTests(unittest.TestCase):
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn('property="og:title" content="手動輸入標題"', html)
-        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen2-[0-9a-f]{12}\.png"')
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/gen2-[0-9a-f]{12}\.png\?v=2"')
 
     def test_common_social_preview_bots_get_first_party_open_graph_page(self):
         self.store.create_url("https://www.threads.com/@abc/post/preview", code="bots", title="已移除追蹤參數的分享連結")
@@ -501,7 +501,7 @@ class ShortURLTests(unittest.TestCase):
             ]:
                 status, headers, body = app.handle("GET", "/bots", {}, b"", "8.8.8.8", user_agent)
                 self.assertEqual(status, 200, user_agent)
-                self.assertRegex(body.decode(), r'property="og:image" content="https://u\.kuies\.tw/preview-image/bots-[0-9a-f]{12}\.png"')
+                self.assertRegex(body.decode(), r'property="og:image" content="https://u\.kuies\.tw/preview-image/bots-[0-9a-f]{12}\.png\?v=2"')
         finally:
             shortener_app.fetch_open_graph_metadata = original_fetch
             shortener_app.cache_preview_image = original_cache
@@ -723,17 +723,49 @@ class ShortURLTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn('property="og:title" content="原始 Threads 貼文標題"', html)
         self.assertIn('property="og:description" content="原始 Threads 貼文內容摘要"', html)
-        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
-        self.assertRegex(html, r'property="og:image:secure_url" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg\?v=2"')
+        self.assertRegex(html, r'property="og:image:secure_url" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg\?v=2"')
         self.assertIn('name="twitter:card" content="summary_large_image"', html)
-        self.assertRegex(html, r'name="twitter:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
-        self.assertRegex(html, r'<img src="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg"')
+        self.assertRegex(html, r'name="twitter:image" content="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg\?v=2"')
+        self.assertRegex(html, r'<img src="https://u\.kuies\.tw/preview-image/th1-[0-9a-f]{12}\.jpg\?v=2"')
         self.assertIn('property="og:image:type" content="image/jpeg"', html)
         self.assertNotIn("已移除追蹤參數的分享連結", html)
         self.assertEqual(image_status, 200)
         self.assertEqual(image_headers["Content-Type"], "image/jpeg")
         self.assertEqual(image_body, b"fake-jpeg")
         self.assertEqual(self.store.lookup("th1")["clicks"], 0)
+
+    def test_preview_card_uses_cached_image_dimensions_and_schema_cache_buster(self):
+        self.store.create_url("https://www.threads.com/@abc/post/dimensions", code="dim1")
+        image_path = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "dim1.png")
+        # Minimal PNG header declaring the same 588x588 size as the affected card.
+        with open(image_path, "wb") as fh:
+            fh.write(bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452"
+                "0000024c0000024c0806000000"
+            ))
+        self.store.update_preview_metadata(
+            "dim1",
+            {"title": "Threads 貼文｜作者", "description": "貼文說明"},
+            "profile_fallback",
+            image_path=image_path,
+        )
+        app = create_app(self.store, "https://u.kuies.tw", "secret", preview_warm_enabled=True)
+
+        status, _, body = app.handle(
+            "GET",
+            "/dim1",
+            {},
+            b"",
+            "8.8.8.8",
+            "facebookexternalhit/1.1",
+        )
+
+        html = body.decode()
+        self.assertEqual(status, 200)
+        self.assertRegex(html, r"/preview-image/dim1-[0-9a-f]{12}\.png\?v=2")
+        self.assertIn('property="og:image:width" content="588"', html)
+        self.assertIn('property="og:image:height" content="588"', html)
 
     def test_preview_crawler_uses_post_text_as_title_when_original_title_is_author(self):
         self.store.create_url("https://www.threads.com/@abc/post/456", code="th2", title="已移除追蹤參數的分享連結")
@@ -791,7 +823,7 @@ class ShortURLTests(unittest.TestCase):
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn('property="og:title" content="Threads 貼文｜@abc"', html)
-        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/thlog-[0-9a-f]{12}\.png"')
+        self.assertRegex(html, r'property="og:image" content="https://u\.kuies\.tw/preview-image/thlog-[0-9a-f]{12}\.png\?v=2"')
         self.assertNotIn("Threads • 登入", html)
         self.assertNotIn("static.cdninstagram.com", html)
         self.assertEqual(cache_calls, [""])
@@ -943,6 +975,67 @@ class ShortURLTests(unittest.TestCase):
         self.assertIn('property="og:title" content="通訊軟體第一次抓取就應看到的貼文標題"', preview_html)
         self.assertNotIn('property="og:title" content="Threads 分享連結"', preview_html)
         self.assertEqual(self.store.lookup(data["code"])["preview_status"], "ready")
+
+    def test_public_json_api_uses_page_preview_for_social_login_wall_targets(self):
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            preview_warm_enabled=True,
+        )
+        original_fetch = shortener_app.fetch_open_graph_metadata
+        original_profile = shortener_app.fetch_social_profile_fallback_metadata
+        original_cache = shortener_app.cache_preview_image
+        cached_image = os.path.join(shortener_app.PREVIEW_IMAGE_DIR, "cprev.jpg")
+        with open(cached_image, "wb") as fh:
+            fh.write(b"client-preview")
+
+        shortener_app.fetch_open_graph_metadata = lambda url: {}
+        shortener_app.fetch_social_profile_fallback_metadata = lambda url: {}
+        shortener_app.cache_preview_image = (
+            lambda code, image_url, timeout=8, force=False: (cached_image, "image/jpeg")
+        )
+        try:
+            payload = json.dumps({
+                "url": "https://www.threads.com/@abc/post/client-preview?xmt=tracking",
+                "code": "cprev",
+                "clean_tracking": True,
+                "preview": {
+                    "title": "這是範例貼文的內容用來驗證預覽擷取",
+                    "description": "這是範例貼文的內容用來驗證預覽擷取 🫣🫣",
+                    "image": "https://scontent.cdninstagram.com/v/t51.71878-15/post.jpg?signature=temporary",
+                },
+            }).encode()
+            status, _, body = app.handle(
+                "POST",
+                "/api/public/shorten",
+                {"content-type": "application/json"},
+                payload,
+                "8.8.8.8",
+                "extension-test",
+            )
+            data = json.loads(body.decode())
+            row = self.store.lookup(data["code"])
+            preview_status, _, preview_body = app.handle(
+                "GET",
+                f"/{data['code']}",
+                {},
+                b"",
+                "8.8.8.8",
+                "facebookexternalhit/1.1",
+            )
+        finally:
+            shortener_app.fetch_open_graph_metadata = original_fetch
+            shortener_app.fetch_social_profile_fallback_metadata = original_profile
+            shortener_app.cache_preview_image = original_cache
+
+        preview_html = preview_body.decode()
+        self.assertEqual(status, 201)
+        self.assertEqual(row["preview_status"], "ready")
+        self.assertEqual(row["preview_title"], "這是範例貼文的內容用來驗證預覽擷取")
+        self.assertEqual(preview_status, 200)
+        self.assertIn("這是範例貼文的內容用來驗證預覽擷取", preview_html)
+        self.assertIn("/preview-image/", preview_html)
 
     def test_public_json_api_fast_response_returns_before_social_preview_warmup_finishes(self):
         app = create_app(
@@ -1376,7 +1469,7 @@ class ShortURLTests(unittest.TestCase):
             page = fh.read()
         combined = "\n".join([content, popup, page, json.dumps(manifest)])
 
-        self.assertEqual(manifest["version"], "1.7.4")
+        self.assertEqual(manifest["version"], "1.7.5")
         self.assertIn("https://u.kuies.tw/*", manifest["host_permissions"])
         self.assertIn("https://www.facebook.com/*", manifest["host_permissions"])
         self.assertNotIn("192.168.", combined)
@@ -1407,6 +1500,25 @@ class ShortURLTests(unittest.TestCase):
             msg=f"Node regression test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
         )
         self.assertIn("first-copy-short-url-and-facebook-share: ok", result.stdout)
+
+    def test_page_interceptor_extracts_post_text_and_ignores_profile_avatar(self):
+        script_path = os.path.join(
+            os.path.dirname(__file__),
+            "test_page_interceptor_preview_metadata.js",
+        )
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"Node 預覽擷取測試失敗：\nSTDOUT：\n{result.stdout}\nSTDERR：\n{result.stderr}",
+        )
+        self.assertIn("page-preview-metadata: ok", result.stdout)
 
     def test_page_interceptor_first_copy_does_not_wait_for_preview_timeout(self):
         script_path = os.path.join(
