@@ -2,7 +2,7 @@
 
 ## 來源
 
-- 參考圖片：`/Users/example/.hermes/cache/images/img_e39270e49596.jpg`
+- 參考圖片：維護者本機快取之參考圖（未收錄於 repository）
 - 核心標題：`KUIES`，必須精確拼寫，不可由生成模型改字。
 
 ## 保留元素

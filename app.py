@@ -26,7 +26,7 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional, Tuple
-from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
@@ -66,8 +66,10 @@ ALERT_RECENT_WINDOW_SECONDS = 5 * 60
 ALERT_RECENT_COUNT_THRESHOLD = 100
 ALERT_TOTAL_COUNT_THRESHOLD = 1000
 ALERT_RECENT_COOLDOWN_SECONDS = 60 * 60
-DEFAULT_ALERT_EMAIL = "alerts@example.com"
-DEFAULT_ALERT_FROM = "short-url@example.com"
+# Alert mailboxes are deployment settings; keep repository defaults empty so a
+# public checkout never carries personal addresses.
+DEFAULT_ALERT_EMAIL = ""
+DEFAULT_ALERT_FROM = ""
 DEFAULT_SENDMAIL = "/usr/sbin/sendmail"
 PREVIEW_CRAWLER_RE = re.compile(
     r"facebookexternalhit|facebot|messengerbot|meta-externalagent|meta-externalfetcher|"
@@ -263,6 +265,37 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         return None
 
 
+def _open_following_safe_redirects(
+    request: Request, timeout: float, max_redirects: int = 5, opener_factory=None
+):
+    """Open a public URL while re-validating every redirect hop for SSRF safety.
+
+    urllib follows redirects transparently, so without this guard a public
+    target could redirect preview fetches into loopback or private space.
+    Every hop is checked with the same policy used for shortened targets
+    before the next request is made.
+    """
+    opener_factory = opener_factory or (lambda: build_opener(_NoRedirectHandler()))
+    opener = opener_factory()
+    current = request
+    for _ in range(max_redirects + 1):
+        location = ""
+        try:
+            return opener.open(current, timeout=timeout)
+        except HTTPError as exc:
+            if not (300 <= exc.code < 400):
+                raise
+            location = (exc.headers.get("Location") or "").strip() if exc.headers else ""
+        if not location:
+            raise ValueError("redirect without location")
+        next_url = urljoin(current.full_url, location)
+        blocked, _reason = is_blocked_target_url(next_url)
+        if blocked or not is_safe_url(next_url):
+            raise ValueError("blocked redirect target")
+        current = Request(next_url, headers=dict(current.headers), method=current.get_method())
+    raise ValueError("too many redirects")
+
+
 def resolve_threads_share_url(url: str, timeout: float = 2.0, opener=None) -> str:
     """Resolve Threads /share/<token> to a clean canonical post URL."""
     source = url.strip()
@@ -424,6 +457,21 @@ def is_private_client(remote_addr: str) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
+def resolve_client_ip(peer_addr: str, forwarded_header: str = "") -> str:
+    """Resolve the effective client address for LAN/public decisions.
+
+    ``X-Forwarded-For`` is only trusted when the direct peer is a private
+    address (the local reverse proxy); a forged header from a public client
+    must not be able to downgrade itself to LAN privileges.
+    """
+    peer = (peer_addr or "").strip()
+    forwarded = [part.strip() for part in (forwarded_header or "").split(",") if part.strip()]
+    if not forwarded or not is_private_client(peer):
+        return peer
+    public_hops = [addr for addr in forwarded if not is_private_client(addr)]
+    return public_hops[0] if public_hops else forwarded[0]
+
+
 def is_preview_crawler(user_agent: str) -> bool:
     """Return True for Meta/Messenger link-preview crawlers."""
     return bool(PREVIEW_CRAWLER_RE.search(user_agent or ""))
@@ -495,7 +543,7 @@ def fetch_open_graph_metadata(url: str, timeout: int = 5) -> dict:
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _open_following_safe_redirects(request, timeout=timeout) as response:
             raw = response.read(1_500_000)
             charset = response.headers.get_content_charset() or "utf-8"
     except Exception:
@@ -796,7 +844,7 @@ def cache_preview_image(
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _open_following_safe_redirects(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             data = response.read(MAX_PREVIEW_IMAGE_BYTES + 1)
     except Exception:
@@ -1848,7 +1896,7 @@ class ShortURLApp:
 
     def _authorized(self, headers: Dict[str, str]) -> bool:
         expected = f"Bearer {self.admin_token}"
-        return bool(self.admin_token) and headers.get("authorization", "") == expected
+        return bool(self.admin_token) and hmac.compare_digest(headers.get("authorization", ""), expected)
 
     def _create(self, headers: Dict[str, str], body: bytes) -> Tuple[int, Dict[str, str], bytes]:
         if not self._authorized(headers):
@@ -2290,14 +2338,22 @@ class ShortURLApp:
         return 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex,nofollow"}, html_doc.encode("utf-8")
 
     def _html_report(self) -> Tuple[int, Dict[str, str], bytes]:
-        mailto = "mailto:short-url@example.com?subject=%E6%AA%A2%E8%88%89%20u.kuies.tw%20%E7%9F%AD%E7%B6%B2%E5%9D%80"
+        contact_email = self.alert_from or self.alert_email
+        mailto = f"mailto:{contact_email}?subject=%E6%AA%A2%E8%88%89%20u.kuies.tw%20%E7%9F%AD%E7%B6%B2%E5%9D%80"
+        if contact_email:
+            contact_html = (
+                f'<p><a href="{html.escape(mailto, quote=True)}">'
+                f"寄信到 {html.escape(contact_email)}</a></p>"
+            )
+        else:
+            contact_html = "<p>請透過服務維護者管道聯絡。</p>"
         html_doc = f"""<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>檢舉 u.kuies.tw 短網址</title>{self._style()}</head>
 <body><h1>🚩 檢舉 u.kuies.tw 短網址</h1><div class="card">
 <p>如果你認為某個 <code>u.kuies.tw</code> 短網址涉及詐騙、惡意軟體、釣魚、冒充或其他濫用，請寄信回報。</p>
 <p>請提供：</p><ol><li>可疑短網址</li><li>你遇到的問題</li><li>相關截圖或說明</li></ol>
-<p><a href="{mailto}">寄信到 short-url@example.com</a></p>
+{contact_html}
 </div></body></html>"""
         return 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex,nofollow"}, html_doc.encode("utf-8")
 
@@ -2529,11 +2585,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, body: bytes) -> None:
         headers = {k.lower(): v for k, v in self.headers.items()}
-        forwarded = [part.strip() for part in self.headers.get("X-Forwarded-For", "").split(",") if part.strip()]
-        remote_addr = self.client_address[0]
-        if forwarded:
-            public_hops = [addr for addr in forwarded if not is_private_client(addr)]
-            remote_addr = public_hops[0] if public_hops else forwarded[0]
+        remote_addr = resolve_client_ip(
+            self.client_address[0], self.headers.get("X-Forwarded-For", "")
+        )
         status, out_headers, out_body = self.app.handle(
             self.command,
             self.path,

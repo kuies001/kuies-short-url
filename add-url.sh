@@ -4,7 +4,8 @@ if [ $# -lt 1 ] || [ $# -gt 2 ]; then
   echo "用法：$0 <長網址> [自訂短碼]" >&2
   exit 2
 fi
-cd /Users/example/.hermes/experiments/kuies-short-url
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 set -a
 source ./.env
 set +a

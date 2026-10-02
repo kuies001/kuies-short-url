@@ -4,9 +4,9 @@
 
 ## 位置
 
-- 專案：`/Users/example/.hermes/experiments/kuies-short-url`
+- 專案：本 repository（部署路徑依環境調整，輔助腳本以自身所在目錄為準）
 - 資料庫：`data/shorturls.sqlite3`
-- launchd：`~/Library/LaunchAgents/com.kuies.short-url.plist`
+- 常駐服務：macOS launchd（`com.kuies.short-url`）
 - 服務 Port：`8787`
 - 首頁：`https://u.kuies.tw/`，會導向短網址頁面 `/surl`
 - 短網址頁面：`https://u.kuies.tw/surl`
@@ -70,7 +70,7 @@ launchctl kickstart -k gui/$(id -u)/com.kuies.short-url
 - 私有 IP / loopback / link-local：視為內網
 - 公開 IP：視為外網
 
-NAS 反向代理建議覆寫或正確傳遞 `X-Forwarded-For`，不要讓外部使用者自訂的 `X-Forwarded-For` 原樣穿透。此服務端會在多段 `X-Forwarded-For` 中只要看到公開 IP 就視為外網，以降低偽造內網 IP 的風險。
+NAS 反向代理建議覆寫或正確傳遞 `X-Forwarded-For`，不要讓外部使用者自訂的 `X-Forwarded-For` 原樣穿透。此服務端只在直接連線來自私有網段（本機反向代理）時才採信 `X-Forwarded-For`；直接來自公開 IP 的連線一律視為外網。多段 `X-Forwarded-For` 中只要看到公開 IP 就視為外網，以降低偽造內網 IP 的風險。
 
 ## 社群預覽架構
 
@@ -123,13 +123,13 @@ https://u.kuies.tw/privacy/threads-link-cleaner
 自訂短碼：
 
 ```bash
-/Users/example/.hermes/experiments/kuies-short-url/add-url.sh "https://example.com/very/long/url" demo
+./add-url.sh "https://example.com/very/long/url" demo
 ```
 
 自動短碼：
 
 ```bash
-/Users/example/.hermes/experiments/kuies-short-url/add-url.sh "https://example.com/very/long/url"
+./add-url.sh "https://example.com/very/long/url"
 ```
 
 回傳會包含：
@@ -162,10 +162,8 @@ https://u.kuies.tw/privacy/threads-link-cleaner
 - 5 分鐘內新增達 100 筆短網址。
 - 短網址總筆數達 1000 筆。
 
-預設通知收件人：`alerts@example.com`；寄件人：`short-url@example.com`。可用環境變數調整：
-
-- `SHORT_ALERT_EMAIL`：收件人，預設 `alerts@example.com`。
-- `SHORT_ALERT_FROM`：寄件人，預設 `short-url@example.com`。
+- `SHORT_ALERT_EMAIL`：收件人，未設定時不寄信。
+- `SHORT_ALERT_FROM`：寄件人。
 - `SHORT_ALERT_SENDMAIL`：sendmail 路徑，預設 `/usr/sbin/sendmail`。
 
 警示狀態會存在 SQLite 的 `alert_state` 表，避免總筆數達 1000 後每次新增都重複寄信；5 分鐘新增 100 筆警示有 1 小時冷卻時間。

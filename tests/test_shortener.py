@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from email.message import Message
 from urllib.error import HTTPError
 from urllib.parse import quote
 
@@ -21,9 +22,41 @@ from app import (
     is_safe_url,
     make_code,
     needs_warning_page,
+    resolve_client_ip,
     sanitize_preview_metadata,
     target_hash_for,
 )
+
+
+class _StubOpener:
+    """Opener double that replays a scripted list of outcomes for each open()."""
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+
+    def open(self, request, timeout=None):
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _FakePreviewResponse:
+    """Minimal response object exposing the URL helpers the fetcher uses."""
+
+    def __init__(self, url):
+        self._url = url
+        self.status = 200
+
+    def geturl(self):
+        return self._url
+
+
+def _redirect_error(url: str, location: str, code: int = 302) -> HTTPError:
+    """Build an HTTPError shaped like urllib's redirect exception."""
+    headers = Message()
+    headers["Location"] = location
+    return HTTPError(url, code, "Found", headers, None)
 
 
 class ShortURLTests(unittest.TestCase):
@@ -210,6 +243,16 @@ class ShortURLTests(unittest.TestCase):
         for addr in ["127.0.0.1", "192.168.1.88", "10.0.0.5", "172.16.0.2", "fd00::1", "::1"]:
             self.assertTrue(is_private_client(addr), addr)
         self.assertFalse(is_private_client("8.8.8.8"))
+
+    def test_forwarded_header_is_only_trusted_from_private_peer(self):
+        # A public client cannot spoof LAN privileges with X-Forwarded-For.
+        self.assertEqual(resolve_client_ip("8.8.8.8", "192.168.1.5"), "8.8.8.8")
+        # The local reverse proxy may forward an external visitor's public IP.
+        self.assertEqual(resolve_client_ip("192.168.1.23", "8.8.4.4"), "8.8.4.4")
+        # A forwarded private chain stays LAN for the private proxy peer.
+        self.assertEqual(resolve_client_ip("192.168.1.23", "192.168.1.50"), "192.168.1.50")
+        # Without forwarded headers, the direct peer decides.
+        self.assertEqual(resolve_client_ip("8.8.8.8", ""), "8.8.8.8")
 
     def test_create_and_lookup_short_url(self):
         row = self.store.create_url("https://example.com/a/very/long/url", code="demo")
@@ -1372,12 +1415,54 @@ class ShortURLTests(unittest.TestCase):
         self.assertEqual(headers["Location"], "https://unknown-example.com/login?verify=password")
 
     def test_report_page_is_public(self):
-        app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
+        app = create_app(
+            self.store,
+            base_url="https://u.kuies.tw",
+            admin_token="secret",
+            alert_from="short-url@example.com",
+        )
         status, headers, body = app.handle("GET", "/report", {}, b"", "8.8.8.8", "Mozilla/5.0")
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn("檢舉 u.kuies.tw 短網址", html)
         self.assertIn("short-url@example.com", html)
+
+    def test_report_page_hides_contact_when_unconfigured(self):
+        app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
+        status, headers, body = app.handle("GET", "/report", {}, b"", "8.8.8.8", "Mozilla/5.0")
+        self.assertEqual(status, 200)
+        self.assertIn("服務維護者", body.decode())
+
+    def test_preview_fetch_blocks_redirect_into_private_network(self):
+        redirect = _redirect_error("https://example.com/start", "http://192.168.1.10/secret")
+        with self.assertRaises(ValueError):
+            shortener_app._open_following_safe_redirects(
+                shortener_app.Request("https://example.com/start"),
+                timeout=1,
+                opener_factory=lambda: _StubOpener([redirect]),
+            )
+
+    def test_preview_fetch_follows_public_redirect_chain(self):
+        redirect = _redirect_error("https://example.com/start", "https://example.com/final")
+        response = _FakePreviewResponse("https://example.com/final")
+        result = shortener_app._open_following_safe_redirects(
+            shortener_app.Request("https://example.com/start"),
+            timeout=1,
+            opener_factory=lambda: _StubOpener([redirect, response]),
+        )
+        self.assertEqual(result.geturl(), "https://example.com/final")
+
+    def test_fetch_open_graph_metadata_blocks_private_redirect(self):
+        original = shortener_app._open_following_safe_redirects
+
+        def _blocked(*args, **kwargs):
+            raise ValueError("blocked redirect target")
+
+        shortener_app._open_following_safe_redirects = _blocked
+        try:
+            self.assertEqual(shortener_app.fetch_open_graph_metadata("https://example.com/x"), {})
+        finally:
+            shortener_app._open_following_safe_redirects = original
 
     def test_public_json_api_deduplicates_same_canonical_target(self):
         app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
