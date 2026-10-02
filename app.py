@@ -1726,7 +1726,10 @@ class ShortURLApp:
         clean_path = urlparse(path).path
         is_lan = is_private_client(remote_addr)
         if clean_path in {"/", ""} and method in {"GET", "HEAD"}:
-            return self._html_home(is_lan=is_lan)
+            return 302, {
+                "Location": f"{self.base_url.rstrip('/')}/surl",
+                "Cache-Control": "no-store",
+            }, b""
         if clean_path == "/privacy/threads-link-cleaner" and method in {"GET", "HEAD"}:
             return self._html_extension_privacy()
         if clean_path == "/report" and method in {"GET", "HEAD"}:
@@ -2321,19 +2324,6 @@ button{padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#0
 .item{list-style:none;border-top:1px solid #334155;padding:14px 0} ul{padding:0}.grid{display:grid;grid-template-columns:1fr 180px;gap:12px}@media(max-width:720px){.grid{grid-template-columns:1fr}}
 </style>"""
 
-    def _html_home(self, is_lan: bool) -> Tuple[int, Dict[str, str], bytes]:
-        manage = "<p>短網址頁面：<a href='/surl'>/surl</a></p>"
-        html_doc = f"""<!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>kuies.tw 短網址</title>{self._style()}</head>
-<body><h1>🔗 kuies.tw 短網址</h1><div class="card">
-{manage}
-<p>健康檢查：<a href="/healthz">/healthz</a></p>
-<p>Chrome 擴充隱私權政策：<a href="/privacy/threads-link-cleaner">/privacy/threads-link-cleaner</a></p>
-<p class="muted">公開頁面可縮網址；管理清單只在內網且輸入管理金鑰後顯示。</p>
-</div></body></html>"""
-        return 200, {"Content-Type": "text/html; charset=utf-8"}, html_doc.encode("utf-8")
-
     def _html_extension_privacy(self) -> Tuple[int, Dict[str, str], bytes]:
         html_doc = f"""<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2378,8 +2368,8 @@ button{padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#0
 </div>
 <div class="card">
   <h2>Chrome 擴充</h2>
-  <p><a href="/downloads/threads-link-cleaner.zip">點此下載安裝 Chrome 擴充</a></p>
-  <p class="muted">下載後先解壓縮，再到 Chrome 擴充功能頁開啟「開發人員模式」→「載入未封裝項目」。追蹤清理目前支援 Threads、Facebook 與 IG。</p>
+  <p><a href="https://chromewebstore.google.com/detail/kuiestw-short-url/icbadaliljifnlpgnadgiekcfeiblgdh" target="_blank" rel="noopener noreferrer">點此下載安裝 Chrome 擴充</a></p>
+  <p class="muted">追蹤清理目前支援 Threads、Facebook 與 IG。</p>
 </div>"""
 
     def _html_public(self, is_lan: bool, result_url: str = "", message: str = "", status: int = 200) -> Tuple[int, Dict[str, str], bytes]:
@@ -2415,6 +2405,7 @@ button{padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#0
 {result_html}
 {self._shorten_form()}
 {manage_html}
+<footer class="muted" style="text-align:center;margin:28px 0"><a href="/privacy/threads-link-cleaner">Chrome 擴充隱私權政策</a></footer>
 </body></html>"""
         return status, {"Content-Type": "text/html; charset=utf-8"}, html_doc.encode("utf-8")
 

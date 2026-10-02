@@ -854,7 +854,8 @@ class ShortURLTests(unittest.TestCase):
         self.assertIn("縮短網址", html)
         self.assertNotIn("管理金鑰", html)
         self.assertNotIn("已建立短網址", html)
-        self.assertNotIn("priv", html)
+        self.assertNotIn("https://u.kuies.tw/priv", html)
+        self.assertNotIn("https://example.com/private", html)
 
     def test_admin_route_is_removed(self):
         app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
@@ -1426,13 +1427,27 @@ class ShortURLTests(unittest.TestCase):
         self.assertEqual(data["short_url"], "https://u.kuies.tw/ig123")
         self.assertEqual(data["target_url"], "https://www.instagram.com/p/ABC/?foo=keep")
 
-    def test_surl_page_links_chrome_extension_download(self):
+    def test_root_redirects_to_shortener_page_for_get_and_head(self):
+        app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
+        for method in ("GET", "HEAD"):
+            with self.subTest(method=method):
+                status, headers, body = app.handle(method, "/", {}, b"", "8.8.8.8", "test")
+                self.assertEqual(status, 302)
+                self.assertEqual(headers["Location"], "https://u.kuies.tw/surl")
+                self.assertEqual(body, b"")
+
+    def test_surl_page_links_chrome_extension_store_and_footer_privacy_policy(self):
         app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")
         status, headers, body = app.handle("GET", "/surl", {}, b"", "8.8.8.8", "test")
         html = body.decode()
         self.assertEqual(status, 200)
         self.assertIn("點此下載安裝 Chrome 擴充", html)
-        self.assertIn("/downloads/threads-link-cleaner.zip", html)
+        self.assertIn('href="https://chromewebstore.google.com/detail/kuiestw-short-url/icbadaliljifnlpgnadgiekcfeiblgdh"', html)
+        self.assertNotIn('href="/downloads/threads-link-cleaner.zip"', html)
+        privacy_link = 'href="/privacy/threads-link-cleaner"'
+        self.assertIn(privacy_link, html)
+        self.assertGreater(html.rfind(privacy_link), html.index("點此下載安裝 Chrome 擴充"))
+        self.assertLess(html.rfind(privacy_link), html.rfind("</body>"))
 
     def test_chrome_extension_zip_download(self):
         zip_path = os.path.join(self.tmp.name, "threads-link-cleaner.zip")
@@ -1567,7 +1582,8 @@ class ShortURLTests(unittest.TestCase):
         self.assertIn("管理欄位", html)
         self.assertIn("管理金鑰", html)
         self.assertNotIn("已建立短網址", html)
-        self.assertNotIn("priv", html)
+        self.assertNotIn("https://u.kuies.tw/priv", html)
+        self.assertNotIn("https://example.com/private", html)
 
     def test_external_manage_login_is_forbidden(self):
         app = create_app(self.store, base_url="https://u.kuies.tw", admin_token="secret")

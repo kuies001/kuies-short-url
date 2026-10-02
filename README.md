@@ -8,6 +8,7 @@
 - 資料庫：`data/shorturls.sqlite3`
 - launchd：`~/Library/LaunchAgents/com.kuies.short-url.plist`
 - 服務 Port：`8787`
+- 首頁：`https://u.kuies.tw/`，會導向短網址頁面 `/surl`
 - 短網址頁面：`https://u.kuies.tw/surl`
 - GKD／icash Pay 教學短網址：`https://u.kuies.tw/gkd`（Android 限定，提供本地應用規則、安全邊界、測試與停用方式）
 
@@ -40,7 +41,7 @@ https://u.kuies.tw/surl
 - 複製網址按鈕
 - 可勾選「移除追蹤參數」；目前支援 Threads / Threads.net 移除 `xmt`，以及 Instagram / IG 移除 `utm_source` 與 `igsh` 後再縮網址
 - 公開頁面有基本反爬蟲檢查，且短時間內不可多次建立短網址，以降低濫用/攻擊風險
-- 頁面下方提供 Chrome 擴充下載連結
+- 頁面下方提供 Chrome 線上應用程式商店安裝連結與隱私權政策
 
 外網使用者不可用：
 
@@ -83,20 +84,17 @@ NAS 反向代理建議覆寫或正確傳遞 `X-Forwarded-For`，不要讓外部�
 
 ## Chrome 擴充
 
-下載：
+Chrome 線上應用程式商店：
 
 ```text
-https://u.kuies.tw/downloads/threads-link-cleaner.zip
+https://chromewebstore.google.com/detail/kuiestw-short-url/icbadaliljifnlpgnadgiekcfeiblgdh
 ```
 
-安裝方式：
+隱私權政策：
 
-1. 下載 zip。
-2. 解壓縮。
-3. 開啟 Chrome：`chrome://extensions/`。
-4. 開啟右上角「開發人員模式」。
-5. 點「載入未封裝項目」。
-6. 選擇解壓縮後的 `threads-link-cleaner` 資料夾。
+```text
+https://u.kuies.tw/privacy/threads-link-cleaner
+```
 
 功能：
 
